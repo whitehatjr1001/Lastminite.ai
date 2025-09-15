@@ -1,0 +1,58 @@
+[project]
+name = "agent-api"
+version = "0.1.0"
+description = "an ai agent that uses the web to create a last mine meaning full mind maps"
+readme = "README.md"
+classifiers = [
+    # TODO
+]
+license = {text = "MIT"}
+dependencies = [
+  "typer",
+  "fastapi[standard]",
+  "loguru",
+  "pydantic",
+  "pydantic-settings",
+  "ipykernel",
+  "langchain>=0.3.27",
+  "langgraph>=0.6.7",
+  "directory-tree>=1.0.0",
+  "langchain-openai>=0.3.33",
+  "langchain-groq>=0.3.8",
+  "google>=3.0.0",
+  "google-genai>=1.36.0",
+  "pubmedclient>=0.2.0",
+]
+requires-python = ">= 3.12"
+
+[dependency-groups]
+dev = [
+    "coverage",
+    "pre-commit",
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+lastminute_api = "lastminute_api.cli:app"
+
+[tool.ty]
+# All rules are enabled as "error" by default; no need to specify unless overriding.
+# Example override: relax a rule for the entire project (uncomment if needed).
+# rules.TY015 = "warn"  # For invalid-argument-type, warn instead of error.
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+
+[tool.uv]
+package = true
