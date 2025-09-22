@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+src\agent_api.egg-info
 
 # Distribution / packaging
 .Python
@@ -174,3 +175,5 @@ cython_debug/
 .pypirc
 
 .DS_Store
+
+.env

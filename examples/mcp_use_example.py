@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from mcp.types import CallToolResult, ServerCapabilities, TextContent, Tool
+from mcp.types import CallToolResult, ServerCapabilities, TextContent, Tool, ToolsCapability
 from mcp_use import MCPAgent
 from mcp_use.connectors.base import BaseConnector
 
@@ -60,7 +60,7 @@ class InProcessSearchConnector(BaseConnector):
                 "required": ["query"],
             },
         )
-        self.capabilities = ServerCapabilities(tools=True)
+        self.capabilities = ServerCapabilities(tools=ToolsCapability())
 
     @property
     def public_identifier(self) -> str:
@@ -169,7 +169,7 @@ async def main() -> None:
 
     try:
         for query in queries:
-            print(f"\n🔍 Query: {query}\n{'=' * 60}")
+            print(f"\n?? Query: {query}\n{'=' * 60}")
             response = await agent.run(query)
             print(response)
     finally:
@@ -179,4 +179,9 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+
+
 
