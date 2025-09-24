@@ -61,6 +61,9 @@ class InProcessSearchConnector(BaseConnector):
             },
         )
         self.capabilities = ServerCapabilities(tools=ToolsCapability())
+        self._tools = [self._tool]
+        self._resources: list[Any] = []
+        self._prompts: list[Any] = []
 
     @property
     def public_identifier(self) -> str:
@@ -68,12 +71,23 @@ class InProcessSearchConnector(BaseConnector):
 
     async def connect(self) -> None:
         self._connected = True
+        self._initialized = True
 
     async def disconnect(self) -> None:
         self._connected = False
 
+    async def initialize(self) -> dict[str, Any]:
+        self._initialized = True
+        return {"status": "initialized"}
+
     async def list_tools(self) -> list[Tool]:
         return [self._tool]
+
+    async def list_resources(self) -> list[Any]:
+        return []
+
+    async def list_prompts(self) -> list[Any]:
+        return []
 
     async def call_tool(  # type: ignore[override]
         self,
@@ -179,7 +193,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 
