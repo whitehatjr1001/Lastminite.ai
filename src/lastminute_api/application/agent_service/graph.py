@@ -1,82 +1,38 @@
-# src/lastminute_api/application/agent_service/nodes.py
+"""Assembly utilities for the agent_service LangGraph."""
 
-from typing import Annotated, Literal
-from langchain.tools import tool
-from langgraph.types import Command
-from lastminute_api.application.agent_service.state import AgentState as State
+from __future__ import annotations
 
+from langgraph.graph import END, StateGraph
 
-# === Custom Handoff Tool ===
-
-@tool
-def custom_handoff_tool(
-    agent_name: Annotated[str, "Name of the sub-agent to hand off to (e.g., 'tavily', 'mcp', 'image')"],
-    task_input: Annotated[str, "Input or query string for the sub-agent"],
-):
-    """
-    Custom handoff tool signaling supervisor to delegate to sub-agent with input.
-    Returns a Command instructing the graph to go to the named agent node with state update.
-    """
-    return Command(
-        goto=agent_name,
-        update={"last_query": task_input},
-        graph=Command.PARENT  # Ensures navigation within parent graph
-    )
+from lastminute_api.application.agent_service.node import (
+    image_generation_node,
+    mcp_agent_node,
+    supervisor_node,
+    tavily_agent_node,
+)
+from lastminute_api.application.agent_service.state import AgentState
 
 
-# === Supervisor Node ===
+def build_revision_graph() -> StateGraph:
+    """Create and compile the supervisory LangGraph for the agent service."""
+    graph = StateGraph(AgentState)
 
-def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent", "image_agent", "__end__"]]:
-    """
-    Supervisor node decides which sub-agent to call next and calls the handoff tool.
+    graph.add_node("supervisor", supervisor_node)
+    graph.add_node("tavily_agent", tavily_agent_node)
+    graph.add_node("mcp_agent", mcp_agent_node)
+    graph.add_node("image_agent", image_generation_node)
 
-    Uses a simple heuristic to choose agent and performs handoff via custom tool.
-    """
-    query = state.last_query if hasattr(state, "last_query") else ""
+    graph.set_entry_point("supervisor")
 
-    # Simple routing logic demo (customize as required)
-    if not query:
-        return Command(goto="__end__")
+    # Supervisory node uses Commands to jump dynamically, so we only need explicit
+    # return edges from workers back to the supervisor.
+    graph.add_edge("tavily_agent", "supervisor")
+    graph.add_edge("mcp_agent", "supervisor")
+    graph.add_edge("image_agent", "supervisor")
 
-    if len(query) < 20:
-        # Hand off to Tavily quick search agent
-        return custom_handoff_tool("tavily_agent", query)
+    graph.add_edge("supervisor", END)
 
-    # After quick search, delegate complex reasoning
-    if getattr(state, "current_task", None) == "quick_search":
-        return custom_handoff_tool("mcp_agent", query)
-
-    if getattr(state, "current_task", None) == "complex_search":
-        return custom_handoff_tool("image_agent", query)
-
-    # Start with Tavily agent by default
-    return custom_handoff_tool("tavily_agent", query)
+    return graph
 
 
-# === Stub Sub-Agent Nodes ===
-
-def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
-    # Simulate quick search and return control to supervisor
-    answer = f"Tavily quick search result for: {state.last_query}"
-    updated_state = state.copy()
-    updated_state.last_answer = answer
-    updated_state.chat_response = answer
-    updated_state.current_task = "quick_search"
-    return Command(goto="supervisor", update=updated_state.dict())
-
-def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
-    # Simulate complex MCP reasoning and return to supervisor
-    answer = f"MCP reasoning result for: {state.last_query}"
-    updated_state = state.copy()
-    updated_state.last_answer = answer
-    updated_state.chat_response = answer
-    updated_state.current_task = "complex_search"
-    return Command(goto="supervisor", update=updated_state.dict())
-
-def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
-    # Simulate image generation and return control
-    image_url = "https://dummy.image/mindmap.png"
-    updated_state = state.copy()
-    updated_state.image_url = image_url
-    updated_state.current_task = "image_generation"
-    return Command(goto="supervisor", update=updated_state.dict())
+__all__ = ["build_revision_graph"]

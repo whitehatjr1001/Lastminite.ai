@@ -5,6 +5,9 @@ from langchain_core.messages import HumanMessage
 
 PROMPT_MAPPER = {
     "router": "ROUTER_PROMPT",
+    "simple_answer": "SIMPLE_ANSWER_PROMPT",
+    "quick_search_summary": "QUICK_SEARCH_SUMMARY_PROMPT",
+    "deep_research_brief": "DEEP_RESEARCH_BRIEF_PROMPT",
     "tavily_search": "TAVILY_SEARCH_PROMPT",
     "mcp_agent": "MCP_AGENT_PROMPT",
     "image_generation": "IMAGE_GENERATION_PROMPT",
@@ -14,21 +17,64 @@ PROMPT_MAPPER = {
 # Router Prompt: classify query complexity
 
 ROUTER_PROMPT = """
-Classify the user's query as 'quick_search' or 'complex_search'.
+You are a supervisor deciding how to handle an incoming user request.
+
+Classify the query into exactly one of the following categories:
+- simple_answer → the supervisor can answer directly without external tools.
+- quick_search → requires a light-weight web lookup (Tavily search) before answering.
+- deep_research → requires a deep MCP toolchain workflow.
+- image_generation → user wants a diagram, illustration, or other image output.
+
+Return only one of: simple_answer, quick_search, deep_research, image_generation.
 
 Query: {input}
-
-Examples:
-Query: "What is photosynthesis?"
-Answer: quick_search
-
-Query: "Explain the mechanism of synaptic transmission with steps."
-Answer: complex_search
-
-Return only the classification: quick_search or complex_search.
 """
 
-# Tavily Quick Search Prompt: concise factual answer
+
+SIMPLE_ANSWER_PROMPT = """
+You are a helpful expert. Provide a concise and direct answer to the user's question.
+
+Question: {input}
+
+Answer clearly and accurately in a short paragraph.
+"""
+
+
+QUICK_SEARCH_SUMMARY_PROMPT = """
+You are composing a short answer from quick web search snippets.
+
+User query:
+{query}
+
+Search snippets:
+{search_results}
+
+Craft a factual, neutral answer in 2-3 sentences citing insights from the snippets. Do not fabricate details.
+"""
+
+
+DEEP_RESEARCH_BRIEF_PROMPT = """
+You are preparing a deep research brief for an MCP agent with multiple tools.
+
+User query:
+{input}
+
+Provide:
+1. A refined research objective in one sentence.
+2. Three bullet points outlining specific sub-questions or data to collect.
+3. Recommended tools or data sources if relevant.
+
+Format as:
+Objective: ...
+Sub-questions:
+- ...
+- ...
+- ...
+Tools:
+- ... (if none, write "- none specified")
+"""
+
+# Tavily Quick Search Prompt retained for compatibility
 
 TAVILY_SEARCH_PROMPT = """
 You are a fact-retrieval assistant using Tavily.

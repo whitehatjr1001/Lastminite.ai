@@ -22,6 +22,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pytest-dotenv" },
+    { name = "requests" },
     { name = "typer" },
 ]
 
@@ -51,6 +52,7 @@ requires-dist = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pytest-dotenv", specifier = ">=0.5.2" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "typer" },
 ]
 
