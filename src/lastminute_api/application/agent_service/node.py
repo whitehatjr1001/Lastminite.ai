@@ -160,7 +160,50 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     if not query:
         return Command(goto="__end__")
 
-    classification = _invoke_prompt("router", input=query).lower()
+    lower_query = query.lower()
+    classification: Optional[str] = None
+
+    image_keywords = [
+        "diagram",
+        "image",
+        "illustration",
+        "infographic",
+        "picture",
+        "visual",
+        "flowchart",
+        "mind map",
+    ]
+    if any(keyword in lower_query for keyword in image_keywords):
+        classification = "image_generation"
+
+    deep_keywords = [
+        "in-depth",
+        "comprehensive",
+        "strategy",
+        "market analysis",
+        "research plan",
+        "detailed report",
+        "systematic review",
+        "compare",
+    ]
+    if classification is None and any(keyword in lower_query for keyword in deep_keywords):
+        classification = "deep_research"
+
+    quick_keywords = [
+        "latest",
+        "recent",
+        "current",
+        "today",
+        "price",
+        "news",
+        "update",
+        "find",
+    ]
+    if classification is None and any(keyword in lower_query for keyword in quick_keywords):
+        classification = "quick_search"
+
+    if classification is None:
+        classification = _invoke_prompt("router", input=query).lower()
     logger.info("Supervisor classified query as '%s'", classification)
 
     if classification not in {"simple_answer", "quick_search", "deep_research", "image_generation"}:
@@ -241,7 +284,11 @@ def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
     try:
         raw_results = _tavily_search(query)
         formatted = _format_tavily_results(raw_results)
-        answer = _invoke_prompt("quick_search_summary", query=query, search_results=formatted)
+        if formatted.strip():
+            answer = _invoke_prompt("quick_search_summary", query=query, search_results=formatted)
+        else:
+            answer = _invoke_prompt("simple_answer", input=query)
+            raw_results = {"results": []}
     except Exception as exc:  # pragma: no cover - network failure branch
         logger.exception("Tavily search failed")
         answer = f"Quick search failed: {exc}"

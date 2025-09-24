@@ -17,17 +17,30 @@ PROMPT_MAPPER = {
 # Router Prompt: classify query complexity
 
 ROUTER_PROMPT = """
-You are a supervisor deciding how to handle an incoming user request.
+You are a routing expert deciding how the supervisor should respond to a user query.
 
-Classify the query into exactly one of the following categories:
-- simple_answer → the supervisor can answer directly without external tools.
-- quick_search → requires a light-weight web lookup (Tavily search) before answering.
-- deep_research → requires a deep MCP toolchain workflow.
-- image_generation → user wants a diagram, illustration, or other image output.
+Choose exactly one of the following options:
+- simple_answer – The question is self-contained and can be answered from knowledge without external tools.
+- quick_search – Needs a light web lookup (recent facts, specific figures, up-to-date info) but not deep reasoning.
+- deep_research – Requires multi-source investigation, complex synthesis, or specialised tools.
+- image_generation – The user explicitly wants an image, diagram, infographic, illustration, or visual description.
 
-Return only one of: simple_answer, quick_search, deep_research, image_generation.
+Guidelines:
+- Prefer simple_answer when the request is conceptual, definitional, or clearly answerable without search.
+- Prefer image_generation when keywords like image, diagram, picture, infographic, illustration, flowchart appear.
+- Prefer quick_search for time-sensitive or fact lookup queries (latest, recent, stats, dates, price).
+- Prefer deep_research when the user asks for comprehensive analysis, multi-step plans, or cross-domain research.
 
-Query: {input}
+Respond with just one label: simple_answer, quick_search, deep_research, or image_generation.
+
+Examples:
+Query: "Define osmosis in one sentence." → simple_answer
+Query: "What is the latest inflation rate in the US?" → quick_search
+Query: "Create a detailed market analysis of the EV sector for 2025." → deep_research
+Query: "Generate an infographic explaining the water cycle." → image_generation
+
+User query: {input}
+Answer:
 """
 
 
