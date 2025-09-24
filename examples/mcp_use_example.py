@@ -5,7 +5,7 @@ This script demonstrates how to expose the new ``ArxivMCPClient`` and
 consumed by the ``mcp_use`` SDK.  Instead of spawning external MCP
 servers, we register lightweight in-process connectors that translate
 tool calls directly into HTTP requests.
-"""
+"""  
 
 from __future__ import annotations
 
