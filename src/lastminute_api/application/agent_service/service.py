@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from functools import lru_cache
 from typing import Any, Dict, Sequence
+import logging
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
@@ -85,4 +86,20 @@ __all__ = [
     "run_revision_agent",
     "run_revision_agent_sync",
     "summarise_agent_result",
+    "configure_agent_logging",
 ]
+LOGGER_NAMESPACE = "lastminute_api.application.agent_service"
+
+
+def configure_agent_logging(level: int = logging.INFO) -> None:
+    """Configure verbose logging for the agent service namespace."""
+
+    logger = logging.getLogger(LOGGER_NAMESPACE)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s: %(message)s")
+        )
+        logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False

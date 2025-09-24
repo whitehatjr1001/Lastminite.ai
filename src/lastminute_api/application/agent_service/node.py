@@ -204,6 +204,9 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
 
     if classification is None:
         classification = _invoke_prompt("router", input=query).lower()
+        logger.debug("Router LLM classification for query '%s': %s", query, classification)
+    else:
+        logger.debug("Heuristic classification for query '%s': %s", query, classification)
     logger.info("Supervisor classified query as '%s'", classification)
 
     if classification not in {"simple_answer", "quick_search", "deep_research", "image_generation"}:
@@ -284,9 +287,11 @@ def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
     try:
         raw_results = _tavily_search(query)
         formatted = _format_tavily_results(raw_results)
+        logger.debug("Tavily returned %d snippets", len(raw_results.get("results", [])))
         if formatted.strip():
             answer = _invoke_prompt("quick_search_summary", query=query, search_results=formatted)
         else:
+            logger.info("No Tavily snippets found – falling back to simple answer prompt")
             answer = _invoke_prompt("simple_answer", input=query)
             raw_results = {"results": []}
     except Exception as exc:  # pragma: no cover - network failure branch
@@ -347,9 +352,16 @@ def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
             image_url = ""
             text = "Image generation completed without returning an asset."
     except Exception as exc:  # pragma: no cover - network failure branch
-        logger.exception("Image generation failed")
+        logger.exception("Image generation failed", exc_info=exc)
         image_url = ""
-        text = f"Image generation failed: {exc}"
+        error_text = str(exc)
+        if "content_policy_violation" in error_text:
+            text = (
+                "Image generation request was blocked by the provider's safety filters. "
+                "Please rephrase the prompt to avoid restricted content."
+            )
+        else:
+            text = f"Image generation failed: {exc}"
 
     update = state.copy()
     update.update(

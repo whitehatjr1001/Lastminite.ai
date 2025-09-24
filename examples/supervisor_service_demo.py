@@ -1,9 +1,11 @@
 """Run the supervisory agent service end-to-end."""
 
 import asyncio
+import logging
 from dotenv import load_dotenv
 
 from lastminute_api.application.agent_service.service import (
+    configure_agent_logging,
     run_revision_agent,
     summarise_agent_result,
 )
@@ -11,8 +13,9 @@ from lastminute_api.application.agent_service.service import (
 
 async def main() -> None:
     load_dotenv()
+    configure_agent_logging(logging.DEBUG)
 
-    query = "Create a mind map of the key concepts in AI, including machine learning, neural networks, and natural language processing. Also, generate a simple diagram illustrating a neural network."
+    query = "Generate a concise explanation of CRISPR and include a diagram prompt."
     state = await run_revision_agent(query)
     summary = summarise_agent_result(state)
 

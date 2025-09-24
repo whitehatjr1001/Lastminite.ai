@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from src.lastminute_api.infrastructure.nano_bannana.openai import create_openai_client
 
 # --- Configuration ---
-PROMPT = "A high-resolution, photorealistic banana wearing sunglasses on a tropical beach."
+PROMPT = "image of a heart labelled with its main parts for study purposes"
 OUTPUT_FILENAME = "output_image.png"
 # -------------------
 
