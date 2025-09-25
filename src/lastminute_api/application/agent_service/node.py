@@ -1,11 +1,4 @@
-"""Supervisory nodes for the agent_service layer.
-
-This module wires a supervisor that can either respond directly or
-delegate to specialised workers (quick web search, deep MCP research,
-image generation). A custom hand-off tool is exposed so the supervisor
-can switch execution to the appropriate node while carrying state
-updates across the LangGraph.
-"""
+"""Supervisory and worker nodes for the agent service orchestration."""
 
 from __future__ import annotations
 
@@ -16,9 +9,10 @@ import os
 from typing import Annotated, Dict, Literal, Optional
 
 import requests
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
+from pydantic import BaseModel, Field
 
 from lastminute_api.application.agent_service.prompts import get_prompt
 from lastminute_api.application.agent_service.state import AgentState as State
@@ -28,13 +22,10 @@ from lastminute_api.infrastructure.nano_bannana.openai import create_openai_clie
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _get_llm():  # pragma: no cover - thin wrapper for clarity
-    return get_llm_by_type("openai")
 
 
 def _extract_user_query(state: State) -> str:
@@ -43,23 +34,13 @@ def _extract_user_query(state: State) -> str:
     messages = state.get("messages", [])
     if messages:
         last_message = messages[-1]
-        # HumanMessage, dict, or tuple depending on caller
         if isinstance(last_message, HumanMessage):
             query = last_message.content
-        elif isinstance(last_message, dict):
-            if last_message.get("role") == "user":
-                query = last_message.get("content", query)
-        else:  # fall back to string repr
+        elif isinstance(last_message, dict) and last_message.get("role") == "user":
+            query = last_message.get("content", query)
+        else:
             query = getattr(last_message, "content", str(last_message))
     return query.strip()
-
-
-def _invoke_prompt(prompt_name: str, **kwargs: str) -> str:
-    prompt = get_prompt(prompt_name).format(**kwargs)
-    llm = _get_llm()
-    logger.debug("Invoking prompt '%s'", prompt_name)
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return getattr(response, "content", "").strip()
 
 
 def _tavily_search(query: str, *, max_results: int = 4) -> Dict[str, object]:
@@ -87,10 +68,6 @@ def _format_tavily_results(result_payload: Dict[str, object], *, max_snippets: i
         url = item.get("url", "")
         snippets.append(f"[{idx}] {title}\n{content}\nSource: {url}".strip())
     return "\n\n".join(snippets)
-
-
-def _build_deep_research_brief(query: str) -> str:
-    return _invoke_prompt("deep_research_brief", input=query)
 
 
 def _append_assistant_message(state: State, content: str, *, ensure_unique: bool = False) -> list:
@@ -137,6 +114,23 @@ def custom_handoff_tool(
 
 
 # ---------------------------------------------------------------------------
+# Supervisor decision schema
+# ---------------------------------------------------------------------------
+
+
+class SupervisorDecision(BaseModel):
+    """Structured decision returned by the routing LLM."""
+
+    action: Literal["simple_answer", "quick_search", "deep_research", "image_generation"] = Field(
+        description="Selected next step"
+    )
+    handoff_query: str = Field(
+        description="Restated or refined query to pass to the chosen worker"
+    )
+    rationale: str = Field(description="Short reasoning for audit logging")
+
+
+# ---------------------------------------------------------------------------
 # Supervisor
 # ---------------------------------------------------------------------------
 
@@ -145,7 +139,6 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     """Orchestrate between self-answering and specialised worker agents."""
     logger.debug("Supervisor invoked with state keys: %s", list(state.keys()))
 
-    # If a worker already produced a response, surface it and end the flow.
     if not state.get("awaiting_subagent") and state.get("chat_response") and not state.get("final_response_sent"):
         messages = _append_assistant_message(state, state["chat_response"], ensure_unique=True)
         update = {
@@ -160,60 +153,57 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     if not query:
         return Command(goto="__end__")
 
-    lower_query = query.lower()
-    classification: Optional[str] = None
+    llm = get_llm_by_type("openai")
+    structured_router = llm.with_structured_output(SupervisorDecision)
 
-    image_keywords = [
-        "diagram",
-        "image",
-        "illustration",
-        "infographic",
-        "picture",
-        "visual",
-        "flowchart",
-        "mind map",
+    history_snippets = []
+    for message in state.get("messages", [])[-4:]:
+        role = getattr(message, "type", None) or getattr(message, "role", None) or "assistant"
+        content = getattr(message, "content", "")
+        if isinstance(message, dict):
+            role = message.get("role", role)
+            content = message.get("content", content)
+        history_snippets.append(f"{role}: {content}")
+
+    supervisor_messages = [
+        SystemMessage(
+            content=(
+                "You are the supervisor for the LastMinute multi-agent system. "
+                "Choose one action: simple_answer, quick_search, deep_research, image_generation. "
+                "Return a refined query for the selected worker and a concise rationale."
+            )
+        ),
+        HumanMessage(
+            content=(
+                "Conversation history (last turns):\n"
+                + ("\n".join(history_snippets) if history_snippets else "<none>")
+                + "\n\nUser query:\n"
+                + query
+            )
+        ),
     ]
-    if any(keyword in lower_query for keyword in image_keywords):
-        classification = "image_generation"
 
-    deep_keywords = [
-        "in-depth",
-        "comprehensive",
-        "strategy",
-        "market analysis",
-        "research plan",
-        "detailed report",
-        "systematic review",
-        "compare",
-    ]
-    if classification is None and any(keyword in lower_query for keyword in deep_keywords):
-        classification = "deep_research"
+    decision = structured_router.invoke(supervisor_messages)
+    logger.info("Supervisor routed to '%s' (%s)", decision.action, decision.rationale)
 
-    quick_keywords = [
-        "latest",
-        "recent",
-        "current",
-        "today",
-        "price",
-        "news",
-        "update",
-        "find",
-    ]
-    if classification is None and any(keyword in lower_query for keyword in quick_keywords):
-        classification = "quick_search"
+    handoff_query = decision.handoff_query.strip() or query
+    supervisor_notes = decision.rationale.strip()
 
-    if classification is None:
-        classification = _invoke_prompt("router", input=query).lower()
-        logger.debug("Router LLM classification for query '%s': %s", query, classification)
-    else:
-        logger.debug("Heuristic classification for query '%s': %s", query, classification)
-    logger.info("Supervisor classified query as '%s'", classification)
-
-    if classification not in {"simple_answer", "quick_search", "deep_research", "image_generation"}:
-        classification = "quick_search"
-
-    if classification == "simple_answer":
-        answer = _invoke_prompt("simple_answer", input=query)
+    if decision.action == "simple_answer":
+        system_content = (
+            "You are the LastMinute supervisor. Provide a direct, well-structured answer. "
+            "Address the user's request succinctly and reference the rationale when helpful."
+        )
+        prompt = get_prompt("simple_answer").format(input=handoff_query)
+        user_content = prompt
+        if supervisor_notes:
+            user_content += f"\n\nSupervisor rationale: {supervisor_notes}"
+        messages = [
+            SystemMessage(content=system_content),
+            HumanMessage(content=user_content),
+        ]
+        response = llm.invoke(messages)
+        answer = getattr(response, "content", "").strip()
         update = {
             "chat_response": answer,
             "last_answer": answer,
@@ -221,27 +211,35 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
             "query_type": "simple_answer",
             "current_task": "simple_answer",
             "final_response_sent": True,
+            "awaiting_subagent": False,
+            "routing_notes": supervisor_notes,
         }
         return Command(goto="__end__", update=update)
 
-    if classification == "quick_search":
+    if decision.action == "quick_search":
         update = {
             "query_type": "quick_search",
             "current_task": "quick_search",
             "awaiting_subagent": True,
             "final_response_sent": False,
             "chat_response": None,
+            "routing_notes": supervisor_notes,
+            "handoff_instructions": supervisor_notes,
         }
         return custom_handoff_tool.invoke(
             {
                 "agent_name": "tavily_agent",
-                "task_input": query,
+                "task_input": handoff_query,
                 "state_update_json": json.dumps(update),
             }
         )
 
-    if classification == "deep_research":
-        research_brief = _build_deep_research_brief(query)
+    if decision.action == "deep_research":
+        prompt = get_prompt("deep_research_brief").format(
+            input=f"{handoff_query}\n\nSupervisor notes: {supervisor_notes or 'N/A'}"
+        )
+        brief_response = llm.invoke([HumanMessage(content=prompt)])
+        research_brief = getattr(brief_response, "content", "").strip()
         update = {
             "query_type": "deep_research",
             "current_task": "deep_research",
@@ -249,6 +247,8 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
             "final_response_sent": False,
             "mcp_query": research_brief,
             "chat_response": None,
+            "routing_notes": supervisor_notes,
+            "handoff_instructions": supervisor_notes,
         }
         return custom_handoff_tool.invoke(
             {
@@ -258,20 +258,21 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
             }
         )
 
-    # image generation branch
-    image_prompt = _invoke_prompt("image_generation", input=query)
+    # image_generation
     update = {
         "query_type": "image_generation",
         "current_task": "image_generation",
         "awaiting_subagent": True,
         "final_response_sent": False,
-        "image_prompt": image_prompt,
+        "image_prompt": handoff_query,
         "chat_response": None,
+        "routing_notes": supervisor_notes,
+        "handoff_instructions": supervisor_notes,
     }
     return custom_handoff_tool.invoke(
         {
             "agent_name": "image_agent",
-            "task_input": image_prompt,
+            "task_input": handoff_query,
             "state_update_json": json.dumps(update),
         }
     )
@@ -284,16 +285,41 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
 
 def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
     query = state.get("last_query", "")
+    supervisor_notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
     try:
         raw_results = _tavily_search(query)
         formatted = _format_tavily_results(raw_results)
         logger.debug("Tavily returned %d snippets", len(raw_results.get("results", [])))
+        llm = get_llm_by_type("openai")
         if formatted.strip():
-            answer = _invoke_prompt("quick_search_summary", query=query, search_results=formatted)
+            system_content = (
+                "You are the LastMinute quick-search specialist. Summarise findings factually."
+            )
+            prompt = get_prompt("quick_search_summary").format(
+                query=query,
+                search_results=formatted,
+            )
+            if supervisor_notes:
+                prompt += f"\n\nSupervisor notes: {supervisor_notes}"
+            messages = [
+                SystemMessage(content=system_content),
+                HumanMessage(content=prompt),
+            ]
+            response = llm.invoke(messages)
+            answer = getattr(response, "content", "").strip()
         else:
             logger.info("No Tavily snippets found – falling back to simple answer prompt")
-            answer = _invoke_prompt("simple_answer", input=query)
+            system_content = (
+                "You are the LastMinute supervisor answering directly. Provide a concise explanation."
+            )
+            prompt = get_prompt("simple_answer").format(input=query)
+            if supervisor_notes:
+                prompt += f"\n\nSupervisor notes: {supervisor_notes}"
+            messages = [SystemMessage(content=system_content), HumanMessage(content=prompt)]
+            response = llm.invoke(messages)
+            answer = getattr(response, "content", "").strip()
             raw_results = {"results": []}
+
     except Exception as exc:  # pragma: no cover - network failure branch
         logger.exception("Tavily search failed")
         answer = f"Quick search failed: {exc}"
@@ -315,6 +341,8 @@ def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
 async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
     query = state.get("last_query") or state.get("mcp_query") or ""
+    if state.get("handoff_instructions"):
+        query = f"{query}\n\nSupervisor notes: {state['handoff_instructions']}"
     agent = create_mcp_agent()
     try:
         result = await agent.run(query)
@@ -338,7 +366,19 @@ async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
 def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
     prompt = state.get("last_query") or state.get("image_prompt") or ""
-    description = state.get("image_prompt") or _invoke_prompt("image_generation", input=prompt)
+    description = state.get("image_prompt")
+    if not description:
+        llm = get_llm_by_type("openai")
+        system_content = (
+            "You are the LastMinute visual imagination agent. Produce a vivid, safe description for image generation."
+        )
+        prompt_text = get_prompt("image_generation").format(input=prompt)
+        notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
+        if notes:
+            prompt_text += f"\n\nSupervisor notes: {notes}"
+        messages = [SystemMessage(content=system_content), HumanMessage(content=prompt_text)]
+        response = llm.invoke(messages)
+        description = getattr(response, "content", "").strip()
     client = create_openai_client({})
 
     try:
