@@ -1,0 +1,3 @@
+#Improve the Image and supervisor node -Isue irreguler routing and image is not grounded  Done
+#integrate a minmap and flash cards aggent
+#make endpoint and deploy on render 

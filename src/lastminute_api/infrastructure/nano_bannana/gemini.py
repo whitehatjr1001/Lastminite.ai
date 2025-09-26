@@ -185,3 +185,51 @@ def create_gemini_client(conf: Dict[str, Any]) -> GeminiNanoBanana:
         default_modalities=modalities,
         default_max_images=max_images,
     )
+
+
+def generate_gemini_image_result(
+    prompt: str,
+    *,
+    shared_options: Dict[str, Any] | None = None,
+    provider_options: Dict[str, Any] | None = None,
+) -> NanoBananaResult:
+    """Generate an image via the Gemini Nano Banana client."""
+
+    options: Dict[str, Any] = {}
+    if shared_options:
+        options.update(shared_options)
+    if provider_options:
+        options.update(provider_options)
+
+    response_modalities = options.pop("response_modalities", ["TEXT", "IMAGE"])
+    if not isinstance(response_modalities, list) or not response_modalities:
+        response_modalities = ["TEXT", "IMAGE"]
+    response_modalities = [str(mode).upper() for mode in response_modalities]
+    if "IMAGE" not in response_modalities:
+        response_modalities.append("IMAGE")
+
+    max_images_raw = options.pop("max_images", None)
+    if max_images_raw is None:
+        max_images_raw = os.getenv("GEMINI_MAX_IMAGES")
+    max_images = _coerce_int(max_images_raw, None)
+    if max_images is not None and max_images < 0:
+        max_images = 0
+
+    model_override = options.pop("model", None) or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-image-preview"
+
+    client_conf: Dict[str, Any] = {"model": model_override, "response_modalities": response_modalities}
+    if max_images is not None:
+        client_conf["max_images"] = max_images
+    for key in ("api_key",):
+        if key in options:
+            client_conf[key] = options.pop(key)
+
+    client = create_gemini_client(client_conf)
+
+    generate_kwargs = dict(options)
+    generate_kwargs["response_modalities"] = response_modalities
+    generate_kwargs["model"] = model_override
+    if max_images is not None:
+        generate_kwargs["max_images"] = max_images
+
+    return client.generate(prompt, **generate_kwargs)

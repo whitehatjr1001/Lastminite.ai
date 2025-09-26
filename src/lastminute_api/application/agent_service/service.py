@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from functools import lru_cache
-from typing import Any, Dict, Sequence
+from typing import Any, Awaitable, Dict, Sequence
 import logging
+from typing import Dict
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
@@ -61,6 +63,29 @@ async def run_revision_agent(
     return _ensure_state(result_state)
 
 
+def _run_in_new_loop(coro: Awaitable[Any]) -> Any:
+    """Execute ``coro`` inside a fresh event loop that closes cleanly."""
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(coro)
+
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            for task in pending:
+                with suppress(asyncio.CancelledError):
+                    loop.run_until_complete(task)
+
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        return result
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 def run_revision_agent_sync(
     query: str,
     *,
@@ -68,7 +93,16 @@ def run_revision_agent_sync(
 ) -> AgentState:
     """Synchronous convenience wrapper around :func:`run_revision_agent`."""
 
-    return asyncio.run(run_revision_agent(query, history=history))
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop – safe to spin up our own isolated loop.
+        return _run_in_new_loop(run_revision_agent(query, history=history))
+
+    raise RuntimeError(
+        "run_revision_agent_sync cannot be called from an active event loop. "
+        "Use 'await run_revision_agent(...)' instead."
+    )
 
 
 def summarise_agent_result(state: Mapping[str, Any]) -> Dict[str, Any]:
@@ -91,15 +125,38 @@ __all__ = [
 LOGGER_NAMESPACE = "lastminute_api.application.agent_service"
 
 
+class EmojiFormatter(logging.Formatter):
+    """Formatter that injects colour and emojis per log level."""
+
+    LEVEL_STYLES: Dict[int, tuple[str, str]] = {
+        logging.DEBUG: ("🧪", "\033[36m"),  # Cyan
+        logging.INFO: ("🧭", "\033[32m"),  # Green
+        logging.WARNING: ("⚠️", "\033[33m"),
+        logging.ERROR: ("❌", "\033[31m"),
+        logging.CRITICAL: ("🚨", "\033[35m"),
+    }
+
+    RESET = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:  # pragma: no cover - formatting
+        emoji, colour = self.LEVEL_STYLES.get(record.levelno, ("🔍", ""))
+        timestamp = self.formatTime(record)
+        message = record.getMessage()
+        parts = [timestamp, f"{emoji} {record.levelname:<7}", record.name, message]
+        line = " | ".join(parts)
+        return f"{colour}{line}{self.RESET}" if colour else line
+
+    def formatTime(self, record, datefmt=None):  # pragma: no cover - lean wrapper
+        return super().formatTime(record, datefmt or "%Y-%m-%d %H:%M:%S")
+
+
 def configure_agent_logging(level: int = logging.INFO) -> None:
     """Configure verbose logging for the agent service namespace."""
 
     logger = logging.getLogger(LOGGER_NAMESPACE)
     if not logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s: %(message)s")
-        )
+        handler.setFormatter(EmojiFormatter("%(message)s"))
         logger.addHandler(handler)
     logger.setLevel(level)
     logger.propagate = False

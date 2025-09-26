@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 import os
-from typing import Annotated, Dict, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import requests
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -18,7 +18,9 @@ from lastminute_api.application.agent_service.prompts import get_prompt
 from lastminute_api.application.agent_service.state import AgentState as State
 from lastminute_api.infrastructure.llm_providers.base import get_llm_by_type
 from lastminute_api.infrastructure.mcp.mcp_agent import create_agent as create_mcp_agent
-from lastminute_api.infrastructure.nano_bannana.openai import create_openai_client
+from lastminute_api.infrastructure.nano_bannana.base import NanoBananaResult
+from lastminute_api.infrastructure.nano_bannana.openai import generate_openai_image_result
+from lastminute_api.infrastructure.nano_bannana.gemini import generate_gemini_image_result
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,11 @@ def _extract_user_query(state: State) -> str:
         else:
             query = getattr(last_message, "content", str(last_message))
     return query.strip()
+
+
+def _preview(text: str, *, limit: int = 200) -> str:
+    cleaned = text.replace("\n", " ").strip()
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 3] + "..."
 
 
 def _tavily_search(query: str, *, max_results: int = 4) -> Dict[str, object]:
@@ -83,6 +90,124 @@ def _append_assistant_message(state: State, content: str, *, ensure_unique: bool
             return messages
     messages.append(AIMessage(content=content))
     return messages
+
+
+def _recent_user_messages(state: State, limit: int = 3) -> List[str]:
+    """Return the most recent user-authored messages (oldest first)."""
+
+    collected: List[str] = []
+    for message in reversed(state.get("messages", [])):
+        role = getattr(message, "type", None) or getattr(message, "role", None)
+        content = getattr(message, "content", "")
+        if isinstance(message, dict):
+            role = message.get("role", role)
+            content = message.get("content", content)
+        if role in {"human", "user"} and content:
+            collected.append(str(content))
+            if len(collected) >= limit:
+                break
+    return list(reversed(collected))
+
+
+def _build_grounded_messages(
+    *,
+    system_content: str,
+    state: State,
+    user_query: str,
+    guidance: str,
+    supervisor_notes: Optional[str] = None,
+    extra_sections: Optional[Sequence[Tuple[str, str]]] = None,
+    include_history: bool = True,
+) -> List[object]:
+    """Compose grounded system/human messages with shared conventions."""
+
+    sections: List[str] = ["User question:", user_query.strip()]
+
+    if extra_sections:
+        for title, body in extra_sections:
+            body_text = body.strip()
+            if body_text:
+                sections.extend(["", title, body_text])
+
+    guidance_text = guidance.strip()
+    if guidance_text:
+        sections.extend(["", "Instructions:", guidance_text])
+
+    if supervisor_notes:
+        sections.extend(["", f"Supervisor rationale: {supervisor_notes.strip()}"])
+
+    if include_history:
+        history_messages = _recent_user_messages(state)
+        if history_messages:
+            sections.extend(["", "Recent user messages:"] + history_messages)
+
+    human_message = "\n".join(filter(None, sections))
+    return [
+        SystemMessage(content=system_content.strip()),
+        HumanMessage(content=human_message),
+    ]
+
+
+def _user_requested_sources(state: State, query: str) -> bool:
+    """Detect whether the user explicitly asked for sources or links."""
+
+    keywords = {
+        "source",
+        "sources",
+        "citation",
+        "citations",
+        "cite",
+        "link",
+        "links",
+        "reference",
+        "references",
+    }
+
+    def _contains_keyword(text: str) -> bool:
+        lowered = text.lower()
+        return any(keyword in lowered for keyword in keywords)
+
+    if _contains_keyword(query):
+        return True
+
+    for message in _recent_user_messages(state, limit=5):
+        if _contains_keyword(message):
+            return True
+
+    return False
+
+
+def _extract_image_options(
+    state: State,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Optional[str]]:
+    """Return shared/openai/gemini option dictionaries and preferred provider."""
+
+    raw = state.get("image_options")
+    if not isinstance(raw, dict):
+        return {}, {}, {}, None
+
+    provider_pref = raw.get("provider")
+    provider = str(provider_pref).lower() if provider_pref else None
+
+    shared = {k: v for k, v in raw.items() if k not in {"provider", "openai", "gemini"}}
+    openai_opts = raw.get("openai") if isinstance(raw.get("openai"), dict) else {}
+    gemini_opts = raw.get("gemini") if isinstance(raw.get("gemini"), dict) else {}
+
+    return shared, dict(openai_opts), dict(gemini_opts), provider
+
+
+def _result_to_payload(result: NanoBananaResult) -> Tuple[str, str]:
+    """Convert a Nano Banana result into assistant text and a data URL."""
+
+    if not result.images:
+        raise RuntimeError("No image content returned.")
+
+    image = result.images[0]
+    mime_type = getattr(image, "mime_type", "image/png") or "image/png"
+    encoded = base64.b64encode(image.data).decode("utf-8")
+    image_url = f"data:{mime_type};base64,{encoded}"
+    text = result.text or "Here is the generated illustration."
+    return text, image_url
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +278,8 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     if not query:
         return Command(goto="__end__")
 
+    logger.info("🧭 Supervisor input: %s", _preview(query))
+
     llm = get_llm_by_type("openai")
     structured_router = llm.with_structured_output(SupervisorDecision)
 
@@ -184,25 +311,31 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     ]
 
     decision = structured_router.invoke(supervisor_messages)
-    logger.info("Supervisor routed to '%s' (%s)", decision.action, decision.rationale)
+    logger.info("🪢 Routed to %s | notes: %s", decision.action, decision.rationale)
 
     handoff_query = decision.handoff_query.strip() or query
     supervisor_notes = decision.rationale.strip()
 
     if decision.action == "simple_answer":
+        logger.debug("🗣️ Simple answer handoff query: %s", _preview(handoff_query))
+
         system_content = (
-            "You are the LastMinute supervisor. Provide a direct, well-structured answer. "
-            "Address the user's request succinctly and reference the rationale when helpful."
+            "You are the LastMinute supervisor responding directly to the user. "
+            "Answer the question factually, acknowledge uncertainty when needed, and do not "
+            "ask the user to restate their request."
         )
-        prompt = get_prompt("simple_answer").format(input=handoff_query)
-        user_content = prompt
-        if supervisor_notes:
-            user_content += f"\n\nSupervisor rationale: {supervisor_notes}"
-        messages = [
-            SystemMessage(content=system_content),
-            HumanMessage(content=user_content),
-        ]
+
+        guidance = get_prompt("simple_answer").format(input=handoff_query)
+        messages = _build_grounded_messages(
+            system_content=system_content,
+            state=state,
+            user_query=handoff_query,
+            guidance=guidance,
+            supervisor_notes=supervisor_notes,
+        )
+
         response = llm.invoke(messages)
+        logger.debug("Supervisor simple answer: %s", _preview(getattr(response, "content", "")))
         answer = getattr(response, "content", "").strip()
         update = {
             "chat_response": answer,
@@ -217,6 +350,7 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
         return Command(goto="__end__", update=update)
 
     if decision.action == "quick_search":
+        logger.debug("🔎 Quick search handoff query: %s", _preview(handoff_query))
         update = {
             "query_type": "quick_search",
             "current_task": "quick_search",
@@ -235,6 +369,7 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
         )
 
     if decision.action == "deep_research":
+        logger.debug("🧠 Deep research handoff query: %s", _preview(handoff_query))
         prompt = get_prompt("deep_research_brief").format(
             input=f"{handoff_query}\n\nSupervisor notes: {supervisor_notes or 'N/A'}"
         )
@@ -286,6 +421,9 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
 def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
     query = state.get("last_query", "")
     supervisor_notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
+    logger.info("🔎 Tavily agent received: %s", _preview(query))
+    if supervisor_notes:
+        logger.debug("🔎 Supervisor notes: %s", supervisor_notes)
     try:
         raw_results = _tavily_search(query)
         formatted = _format_tavily_results(raw_results)
@@ -293,29 +431,38 @@ def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
         llm = get_llm_by_type("openai")
         if formatted.strip():
             system_content = (
-                "You are the LastMinute quick-search specialist. Summarise findings factually."
+                "You are the LastMinute quick-search specialist. Answer using only the snippets provided. "
+                "Be succinct, cite snippet indices like [1], and do not ask the user to rephrase."
             )
-            prompt = get_prompt("quick_search_summary").format(
+            guidance = get_prompt("quick_search_summary").format(
                 query=query,
                 search_results=formatted,
             )
-            if supervisor_notes:
-                prompt += f"\n\nSupervisor notes: {supervisor_notes}"
-            messages = [
-                SystemMessage(content=system_content),
-                HumanMessage(content=prompt),
-            ]
+            messages = _build_grounded_messages(
+                system_content=system_content,
+                state=state,
+                user_query=query,
+                guidance=guidance,
+                supervisor_notes=supervisor_notes,
+                extra_sections=[("Search snippets (numbered):", formatted)],
+            )
             response = llm.invoke(messages)
             answer = getattr(response, "content", "").strip()
+            logger.debug("Tavily agent answer: %s", _preview(answer))
         else:
             logger.info("No Tavily snippets found – falling back to simple answer prompt")
             system_content = (
-                "You are the LastMinute supervisor answering directly. Provide a concise explanation."
+                "You are the LastMinute supervisor responding without snippets. Provide the best concise answer you can, "
+                "flagging any uncertainty, and do not ask the user to restate their request."
             )
-            prompt = get_prompt("simple_answer").format(input=query)
-            if supervisor_notes:
-                prompt += f"\n\nSupervisor notes: {supervisor_notes}"
-            messages = [SystemMessage(content=system_content), HumanMessage(content=prompt)]
+            guidance = get_prompt("simple_answer").format(input=query)
+            messages = _build_grounded_messages(
+                system_content=system_content,
+                state=state,
+                user_query=query,
+                guidance=guidance,
+                supervisor_notes=supervisor_notes,
+            )
             response = llm.invoke(messages)
             answer = getattr(response, "content", "").strip()
             raw_results = {"results": []}
@@ -340,12 +487,42 @@ def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
 
 async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
-    query = state.get("last_query") or state.get("mcp_query") or ""
-    if state.get("handoff_instructions"):
-        query = f"{query}\n\nSupervisor notes: {state['handoff_instructions']}"
+    user_query = state.get("last_query", "")
+    research_brief = state.get("mcp_query", "")
+    supervisor_notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
+
+    instruction_lines = [
+        "Provide a structured, well-organised answer grounded in the evidence you gather.",
+        "Cite any tools or documents you rely on when summarising key findings.",
+    ]
+    if _user_requested_sources(state, user_query or research_brief):
+        instruction_lines.append(
+            "Include a 'Sources' section with URLs or references if the user requested sources or links."
+        )
+    else:
+        instruction_lines.append("If any detail is uncertain, explain the limitation and suggest follow-up steps.")
+
+    query_sections: List[str] = []
+    if user_query.strip():
+        query_sections.extend(["User request:", user_query.strip()])
+    if research_brief.strip() and research_brief.strip() != user_query.strip():
+        query_sections.extend(["", "Research brief:", research_brief.strip()])
+    if supervisor_notes:
+        query_sections.extend(["", f"Supervisor rationale: {supervisor_notes.strip()}"])
+
+    history = _recent_user_messages(state, limit=5)
+    if history:
+        query_sections.extend(["", "Recent user messages:"] + history)
+
+    instruction_text = "\n".join(f"- {line}" for line in instruction_lines)
+    query_sections.extend(["", "Instructions:", instruction_text])
+
+    composed_query = "\n".join(filter(None, query_sections)) or research_brief or user_query
+    logger.info("🧠 MCP agent received: %s", _preview(composed_query))
+
     agent = create_mcp_agent()
     try:
-        result = await agent.run(query)
+        result = await agent.run(composed_query)
         answer = result if isinstance(result, str) else str(result)
     except Exception as exc:  # pragma: no cover - network failure branch
         logger.exception("MCP agent run failed")
@@ -358,6 +535,7 @@ async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
             "chat_response": answer,
             "last_answer": answer,
             "current_task": "deep_research",
+            "last_research_payload": answer,
         }
     )
     update["messages"] = _append_assistant_message(state, answer)
@@ -365,43 +543,76 @@ async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
 
 def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
-    prompt = state.get("last_query") or state.get("image_prompt") or ""
-    description = state.get("image_prompt")
-    if not description:
-        llm = get_llm_by_type("openai")
-        system_content = (
-            "You are the LastMinute visual imagination agent. Produce a vivid, safe description for image generation."
-        )
-        prompt_text = get_prompt("image_generation").format(input=prompt)
-        notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
-        if notes:
-            prompt_text += f"\n\nSupervisor notes: {notes}"
-        messages = [SystemMessage(content=system_content), HumanMessage(content=prompt_text)]
-        response = llm.invoke(messages)
-        description = getattr(response, "content", "").strip()
-    client = create_openai_client({})
+    user_query = state.get("last_query", "")
+    base_prompt = state.get("image_prompt") or user_query
+    supervisor_notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
 
-    try:
-        result = client.generate(description, response_modalities=["image"], max_images=1)
-        if result.images:
-            image = result.images[0]
-            encoded = base64.b64encode(image.data).decode("utf-8")
-            image_url = f"data:{image.mime_type};base64,{encoded}"
-            text = result.text or "Here is the generated illustration."
-        else:
-            image_url = ""
-            text = "Image generation completed without returning an asset."
-    except Exception as exc:  # pragma: no cover - network failure branch
-        logger.exception("Image generation failed", exc_info=exc)
-        image_url = ""
-        error_text = str(exc)
-        if "content_policy_violation" in error_text:
-            text = (
-                "Image generation request was blocked by the provider's safety filters. "
-                "Please rephrase the prompt to avoid restricted content."
-            )
-        else:
-            text = f"Image generation failed: {exc}"
+    logger.info("🎨 Image agent received: %s", _preview(base_prompt))
+
+    llm = get_llm_by_type("openai")
+    system_content = (
+        "You are the LastMinute visual imagination agent. Craft a single vivid, safe prompt for an educational diagram. "
+        "Do not ask the user for more input. Mention key entities, relationships, colours, and layout in one paragraph."
+    )
+    guidance = get_prompt("image_generation").format(input=base_prompt)
+    messages = _build_grounded_messages(
+        system_content=system_content,
+        state=state,
+        user_query=base_prompt,
+        guidance=guidance,
+        supervisor_notes=supervisor_notes,
+        include_history=True,
+    )
+
+    response = llm.invoke(messages)
+    description = getattr(response, "content", "").strip() or base_prompt
+
+    shared_opts, openai_opts, gemini_opts, provider_pref = _extract_image_options(state)
+
+    image_url = ""
+    text = ""
+    used_provider: Optional[str] = None
+    last_error: Optional[str] = None
+
+    def _try_gemini() -> Tuple[str, str]:
+        result = generate_gemini_image_result(
+            description,
+            shared_options=shared_opts,
+            provider_options=gemini_opts,
+        )
+        return _result_to_payload(result)
+
+    def _try_openai() -> Tuple[str, str]:
+        result = generate_openai_image_result(
+            description,
+            shared_options=shared_opts,
+            provider_options=openai_opts,
+        )
+        return _result_to_payload(result)
+
+    if provider_pref == "openai":
+        try:
+            text, image_url = _try_openai()
+            used_provider = "openai"
+        except Exception as exc:  # pragma: no cover - provider-specific failure
+            last_error = str(exc)
+            logger.error("OpenAI image generation failed: %s", exc, exc_info=exc)
+    else:
+        try:
+            text, image_url = _try_gemini()
+            used_provider = "gemini"
+        except Exception as exc:  # pragma: no cover - provider-specific failure
+            last_error = str(exc)
+            logger.warning("Gemini image generation failed: %s", exc, exc_info=exc)
+            try:
+                text, image_url = _try_openai()
+                used_provider = "openai"
+            except Exception as fallback_exc:  # pragma: no cover - provider-specific failure
+                last_error = str(fallback_exc)
+                logger.error("OpenAI fallback failed: %s", fallback_exc, exc_info=fallback_exc)
+
+    if not image_url:
+        text = text or f"Image generation failed: {last_error or 'No provider available.'}"
 
     update = state.copy()
     update.update(
@@ -411,6 +622,8 @@ def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
             "last_answer": text,
             "image_url": image_url,
             "current_task": "image_generation",
+            "image_prompt": description,
+            "image_provider": used_provider,
         }
     )
     update["messages"] = _append_assistant_message(state, text)

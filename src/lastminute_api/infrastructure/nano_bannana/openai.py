@@ -180,3 +180,51 @@ class _OpenAIClientImpl:
 
 def create_openai_client(conf: Dict[str, Any]) -> _OpenAIClientImpl:
     return _OpenAIClientImpl(conf or {})  # factory hook [16]
+
+
+def generate_openai_image_result(
+    prompt: str,
+    *,
+    shared_options: Dict[str, Any] | None = None,
+    provider_options: Dict[str, Any] | None = None,
+) -> NanoBananaResult:
+    """Generate an image via the OpenAI Nano Banana client."""
+
+    options: Dict[str, Any] = {}
+    if shared_options:
+        options.update(shared_options)
+    if provider_options:
+        options.update(provider_options)
+
+    response_modalities = options.pop("response_modalities", ["image"])
+    if not isinstance(response_modalities, list) or not response_modalities:
+        response_modalities = ["image"]
+    response_modalities = [str(mode).lower() for mode in response_modalities]
+    if "image" not in response_modalities:
+        response_modalities.append("image")
+
+    max_images_raw = options.pop("max_images", None)
+    env_max = os.getenv("OPENAI_IMAGE_MAX_N")
+    max_images = max(1, int(env_max)) if env_max and env_max.isdigit() else 1
+    if max_images_raw is not None:
+        try:
+            max_images = max(1, int(max_images_raw))
+        except (TypeError, ValueError):
+            pass
+
+    model_override = options.pop("model", None) or os.getenv("OPENAI_IMAGE_MODEL")
+
+    client_conf: Dict[str, Any] = {}
+    for key in ("api_key", "text_model", "image_model", "size", "quality", "background", "max_n"):
+        if key in options:
+            client_conf[key] = options.pop(key)
+
+    client = create_openai_client(client_conf)
+
+    generate_kwargs = dict(options)
+    generate_kwargs["response_modalities"] = response_modalities
+    generate_kwargs["max_images"] = max_images
+    if model_override:
+        generate_kwargs["model"] = model_override
+
+    return client.generate(prompt=prompt, **generate_kwargs)
