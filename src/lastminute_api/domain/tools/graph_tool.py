@@ -1,8 +1,14 @@
-import networkx as nx
-import matplotlib.pyplot as plt
-from typing import List, Dict, Tuple
-import io
 import base64
+import io
+from typing import Dict, List, Tuple
+
+import matplotlib
+
+# Ensure a non-interactive backend for headless environments.
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+import networkx as nx
 from PIL import Image
 
 class DynamicGraph:

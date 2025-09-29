@@ -261,7 +261,10 @@ class MindMapPlan(BaseModel):
 
     central_topic: str
     nodes: List[str]
-    edges: List[Tuple[str, str]]
+    edges: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Directed edges expressed as {\"source\": ..., \"target\": ...}",
+    )
     bullet_points: List[str] = Field(default_factory=list, description="Key takeaways to narrate the map")
 
 
@@ -602,15 +605,19 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
         HumanMessage(content=plan_prompt),
     ]
 
-    structured_llm = llm.with_structured_output(MindMapPlan)
+    structured_llm = llm.with_structured_output(MindMapPlan, method="function_calling")
 
     mind_map_plan: Optional[MindMapPlan] = None
     nodes: List[str] = []
-    edges: List[Tuple[str, str]] = []
+    edge_tuples: List[Tuple[str, str]] = []
     try:
         mind_map_plan = structured_llm.invoke(plan_messages)
         nodes = list(dict.fromkeys([mind_map_plan.central_topic, *mind_map_plan.nodes]))
-        edges = [(src, dst) for src, dst in mind_map_plan.edges if src and dst]
+        for edge in mind_map_plan.edges:
+            src = edge.get("source") or edge.get("from")
+            dst = edge.get("target") or edge.get("to")
+            if src and dst:
+                edge_tuples.append((src, dst))
     except Exception as exc:
         logger.exception("Mind map planning failed", exc_info=exc)
         text = f"Mind map generation failed while planning: {exc}"
@@ -628,6 +635,7 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
                 "last_search_payload": raw_results,
                 "routing_notes": supervisor_notes,
                 "handoff_instructions": None,
+                "image_url": None,
             }
         )
         update["messages"] = _append_assistant_message(state, text)
@@ -635,7 +643,7 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
     graph_url: Optional[str] = None
     try:
-        tool_args = {"node_names": nodes, "edge_map": edges}
+        tool_args = {"node_names": nodes, "edge_map": edge_tuples}
         graph_url = create_mindmap_graph.invoke(tool_args)
     except Exception as exc:
         logger.warning("Mind map graph rendering failed: %s", exc, exc_info=exc)
@@ -672,7 +680,7 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
     mind_map_data = {
         "central_topic": mind_map_plan.central_topic,
         "nodes": nodes,
-        "edges": [{"source": src, "target": dst} for src, dst in edges],
+        "edges": [{"source": src, "target": dst} for src, dst in edge_tuples],
         "bullet_points": bullet_points,
     }
 
@@ -687,7 +695,7 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
             "mind_map_data": mind_map_data,
             "mind_map_summary": summary_text,
             "mind_map_url": graph_url,
-            "image_url": graph_url or state.get("image_url"),
+            "image_url": graph_url,
             "last_search_payload": raw_results,
             "routing_notes": supervisor_notes,
             "handoff_instructions": None,
