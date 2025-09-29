@@ -15,15 +15,19 @@ class AgentState(MessagesState):
         continue_session (bool): Whether user wants to continue revision session.
         last_answer (Optional[str]): Last generated textual answer.
         mind_map_data (Optional[dict]): Serialized graph data for mind map visualization.
-        image_url (Optional[str]): URL or path to generated image/diagram.
+        mind_map_url (Optional[str]): Data URL of the rendered mind map image.
+        mind_map_summary (Optional[str]): Narrative explanation of the mind map.
+        image_url (Optional[str]): URL or path to generated image/diagram (includes mind maps).
     """
 
     last_query: str = ""
-    query_type: Optional[Literal["simple_answer", "quick_search", "deep_research", "image_generation"]] = None
+    query_type: Optional[Literal["simple_answer", "quick_search", "deep_research", "image_generation", "mind_map"]] = None
     continue_session: bool = False
     last_answer: Optional[str] = None
     current_task: Optional[str] = None
     mind_map_data: Optional[dict] = None
+    mind_map_url: Optional[str] = None
+    mind_map_summary: Optional[str] = None
     image_url: Optional[str] = None
     chat_response: Optional[str] = None
     awaiting_subagent: bool = False

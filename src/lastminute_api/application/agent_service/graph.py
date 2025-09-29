@@ -6,6 +6,7 @@ from langgraph.graph import END, StateGraph
 
 from lastminute_api.application.agent_service.node import (
     image_generation_node,
+    mind_map_agent_node,
     mcp_agent_node,
     supervisor_node,
     tavily_agent_node,
@@ -20,6 +21,7 @@ def build_revision_graph() -> StateGraph:
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("tavily_agent", tavily_agent_node)
     graph.add_node("mcp_agent", mcp_agent_node)
+    graph.add_node("mind_map_agent", mind_map_agent_node)
     graph.add_node("image_agent", image_generation_node)
 
     graph.set_entry_point("supervisor")
@@ -28,6 +30,7 @@ def build_revision_graph() -> StateGraph:
     # return edges from workers back to the supervisor.
     graph.add_edge("tavily_agent", "supervisor")
     graph.add_edge("mcp_agent", "supervisor")
+    graph.add_edge("mind_map_agent", "supervisor")
     graph.add_edge("image_agent", "supervisor")
 
     graph.add_edge("supervisor", END)

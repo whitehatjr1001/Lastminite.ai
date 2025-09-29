@@ -26,6 +26,8 @@ dependencies = [
   "mcp-use>=1.3.10",
   "requests>=2.31.0",
   "chainlit>=2.4.301",
+  "networkx>=3.5",
+  "matplotlib>=3.10.6",
 ]
 requires-python = ">= 3.12"
 

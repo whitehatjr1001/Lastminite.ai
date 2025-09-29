@@ -11,6 +11,8 @@ PROMPT_MAPPER = {
     "tavily_search": "TAVILY_SEARCH_PROMPT",
     "mcp_agent": "MCP_AGENT_PROMPT",
     "image_generation": "IMAGE_GENERATION_PROMPT",
+    "mind_map_brainstorm": "MIND_MAP_BRAINSTORM_PROMPT",
+    "mind_map_summary": "MIND_MAP_SUMMARY_PROMPT",
     "output_assembly": "OUTPUT_ASSEMBLY_PROMPT",
 }
 
@@ -24,20 +26,23 @@ Choose exactly one of the following options:
 - quick_search – Needs a light web lookup (recent facts, specific figures, up-to-date info) but not deep reasoning.
 - deep_research – Requires multi-source investigation, complex synthesis, or specialised tools.
 - image_generation – The user explicitly wants an image, diagram, infographic, illustration, or visual description.
+- mind_map – The user asks for a mind map, concept map, diagram of relationships, or study outline.
 
 Guidelines:
 - Prefer simple_answer when the request is conceptual, definitional, or clearly answerable without search.
-- Prefer image_generation when keywords like image, diagram, picture, infographic, illustration, flowchart appear.
+- Prefer image_generation when keywords like image, diagram, picture, infographic, illustration, flowchart appear and no mind map is requested.
+- Prefer mind_map whenever the user explicitly requests a mind map, concept map, or structured relationship diagram for study.
 - Prefer quick_search for time-sensitive or fact lookup queries (latest, recent, stats, dates, price).
 - Prefer deep_research when the user asks for comprehensive analysis, multi-step plans, or cross-domain research.
 
-Respond with just one label: simple_answer, quick_search, deep_research, or image_generation.
+Respond with just one label: simple_answer, quick_search, deep_research, image_generation, or mind_map.
 
 Examples:
 Query: "Define osmosis in one sentence." → simple_answer
 Query: "What is the latest inflation rate in the US?" → quick_search
 Query: "Create a detailed market analysis of the EV sector for 2025." → deep_research
 Query: "Generate an infographic explaining the water cycle." → image_generation
+Query: "Create a mind map of photosynthesis stages." → mind_map
 
 User query: {input}
 Answer:
@@ -130,6 +135,37 @@ Include key concepts and relationships clearly.
 
 Example:
 "Central node: 'Cardiac Cycle'. Branch nodes: 'Atrial Contraction', 'Ventricular Contraction', 'Relaxation Phase'."
+"""
+
+# Mind Map Planning Prompt: derive nodes and edges from search snippets
+
+MIND_MAP_BRAINSTORM_PROMPT = """
+You are an expert study coach designing a mind map for revision.
+
+Topic: {topic}
+Supervisor notes: {notes}
+
+Reference snippets:
+{search_results}
+
+Provide structured planning information that will feed a graph drawing tool. Focus on
+clear hierarchical relationships and concise concept labels.
+"""
+
+# Mind Map Summary Prompt: narrate generated mind map
+
+MIND_MAP_SUMMARY_PROMPT = """
+You have generated a mind map for the topic "{topic}".
+
+Nodes:
+{nodes}
+
+Key takeaways:
+{bullet_points}
+
+Compose a short explanation (2 paragraphs max) describing how the nodes connect
+and how a student should read the diagram. Start with the central idea, highlight
+major branches, and suggest how to use the map for revision.
 """
 
 # Output Assembly Prompt: merge text and image output
