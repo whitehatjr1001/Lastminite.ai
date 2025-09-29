@@ -1,3 +1,3 @@
 #Improve the Image and supervisor node -Isue irreguler routing and image is not grounded  Done
-#integrate a minmap and flash cards aggent
-#make endpoint and deploy on render 
+#integrate a minmap and flash cards aggent done 
+#improve the mind map agent and create a video and share in linked  dead line 30 sept 
