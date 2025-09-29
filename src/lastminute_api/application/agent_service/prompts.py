@@ -11,7 +11,9 @@ PROMPT_MAPPER = {
     "tavily_search": "TAVILY_SEARCH_PROMPT",
     "mcp_agent": "MCP_AGENT_PROMPT",
     "image_generation": "IMAGE_GENERATION_PROMPT",
-    "mind_map_brainstorm": "MIND_MAP_BRAINSTORM_PROMPT",
+    "mind_map_context": "MIND_MAP_CONTEXT_PROMPT",
+    "mind_map_blueprint": "MIND_MAP_BLUEPRINT_PROMPT",
+    "mind_map_reflection": "MIND_MAP_REFLECTION_PROMPT",
     "mind_map_summary": "MIND_MAP_SUMMARY_PROMPT",
     "output_assembly": "OUTPUT_ASSEMBLY_PROMPT",
 }
@@ -137,35 +139,83 @@ Example:
 "Central node: 'Cardiac Cycle'. Branch nodes: 'Atrial Contraction', 'Ventricular Contraction', 'Relaxation Phase'."
 """
 
-# Mind Map Planning Prompt: derive nodes and edges from search snippets
+# Mind Map Context Prompt: turn snippets into a knowledge chunk
 
-MIND_MAP_BRAINSTORM_PROMPT = """
-You are an expert study coach designing a mind map for revision.
+MIND_MAP_CONTEXT_PROMPT = """
+You are compiling revision notes to drive a study mind map.
 
 Topic: {topic}
 Supervisor notes: {notes}
 
-Reference snippets:
-{search_results}
+Search snippets:
+{snippets}
 
-Provide structured planning information that will feed a graph drawing tool. Focus on
-clear hierarchical relationships and concise concept labels.
+Write a focused knowledge brief (<=220 words) covering:
+1. A one-sentence overview of the topic.
+2. Bullet paragraphs for core categories/types.
+3. Bullet paragraphs for key operations/mechanics.
+4. Bullet paragraphs for applications or benefits.
+
+Use only information available in the snippets (or universal fundamentals if snippets lack detail). Keep the bullet
+paragraphs short (<=40 words each) and factual.
+"""
+
+# Mind Map Blueprint Prompt: convert context into nodes and edges
+
+MIND_MAP_BLUEPRINT_PROMPT = """
+You create concise study mind maps.
+
+Topic: {topic}
+Knowledge brief:
+{context}
+Supervisor notes: {notes}
+Additional feedback: {feedback}
+
+Return JSON exactly matching this schema:
+{{
+  "central_topic": "...",
+  "nodes": ["...", "..."],
+  "edge_map": [["source", "target"], ...],
+  "bullet_points": ["...", "..."]
+}}
+
+Rules:
+1. central_topic must reuse words from the topic/brief and appear in nodes.
+2. Provide 6-10 nodes. Cover overview/definition, major categories or types, operations/mechanics, and use cases/benefits.
+3. edge_map must contain at least six pairs. Every pair must reference nodes you listed. Connect the central topic to each
+   major branch, then link branch nodes to their supporting details.
+4. bullet_points must include exactly three concise study reminders grounded in the brief (≤18 words each).
+5. Never fabricate concepts not supported by the brief.
+"""
+
+# Mind Map Reflection Prompt: validate grounding
+
+MIND_MAP_REFLECTION_PROMPT = """
+Topic: {topic}
+Knowledge brief:
+{context}
+Proposed nodes: {nodes}
+Proposed edges:
+{edges}
+
+Reply strictly with one of:
+- "YES: <reason>" if the nodes/edges are well grounded in the knowledge brief and topic.
+- "NO: <what is missing or incorrect>" otherwise (mention which required branch is weak or what to fix).
 """
 
 # Mind Map Summary Prompt: narrate generated mind map
 
 MIND_MAP_SUMMARY_PROMPT = """
-You have generated a mind map for the topic "{topic}".
+Mind map topic: {topic}
+Knowledge brief:
+{context}
 
-Nodes:
-{nodes}
-
+Nodes: {nodes}
 Key takeaways:
 {bullet_points}
 
-Compose a short explanation (2 paragraphs max) describing how the nodes connect
-and how a student should read the diagram. Start with the central idea, highlight
-major branches, and suggest how to use the map for revision.
+Explain the mind map in <=150 words. Start with the central idea, then describe the major branches and their
+relationships. Highlight how the map helps a student revise this topic.
 """
 
 # Output Assembly Prompt: merge text and image output

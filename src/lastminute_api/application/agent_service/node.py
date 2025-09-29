@@ -257,15 +257,13 @@ class SupervisorDecision(BaseModel):
 
 
 class MindMapPlan(BaseModel):
-    """Structured representation of a mind map planning result."""
+    """Structured mind map output returned by the planning LLM."""
 
     central_topic: str
     nodes: List[str]
-    edges: List[Dict[str, str]] = Field(
-        default_factory=list,
-        description="Directed edges expressed as {\"source\": ..., \"target\": ...}",
-    )
-    bullet_points: List[str] = Field(default_factory=list, description="Key takeaways to narrate the map")
+    edge_map: List[List[str]]
+    bullet_points: List[str] = Field(default_factory=list)
+
 
 
 # ---------------------------------------------------------------------------
@@ -575,113 +573,215 @@ async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
 
 def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
-    query = state.get("last_query", "")
-    supervisor_notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
-    logger.info("🗺️ Mind map agent received: %s", _preview(query))
+    """Generate a mind map plan and image from the user query and context."""
 
-    raw_results: Dict[str, object] = {}
-    formatted_snippets = ""
+    topic = state.get("last_query", "").strip()
+    supervisor_notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
+    logger.info("🗺️ Mind map agent received: %s", _preview(topic))
+
     try:
-        raw_results = _tavily_search(query, max_results=6)
-        formatted_snippets = _format_tavily_results(raw_results, max_snippets=5)
+        web_search = _tavily_search(topic, max_results=6)
     except Exception as exc:  # pragma: no cover - network failure branch
         logger.warning("Mind map Tavily search failed: %s", exc)
+        web_search = {"results": []}
 
+    formatted_snippets = _format_tavily_results(web_search, max_snippets=6)
     llm = get_llm_by_type("openai")
 
-    plan_prompt = get_prompt("mind_map_brainstorm").format(
-        topic=query,
-        search_results=formatted_snippets or "<no snippets>",
+    # Step 1: build a concise knowledge report
+    context_prompt = get_prompt("mind_map_context").format(
+        topic=topic,
         notes=supervisor_notes or "None",
+        snippets=formatted_snippets or "<no snippets>",
     )
-
-    plan_messages = [
-        SystemMessage(
-            content=(
-                "You are a meticulous study planner. Use the provided snippets to craft a mind map plan. "
-                "Return structured data that matches the MindMapPlan schema."
-            )
-        ),
-        HumanMessage(content=plan_prompt),
+    context_messages = [
+        SystemMessage(content="You turn search results into concise revision notes."),
+        HumanMessage(content=context_prompt),
     ]
-
-    structured_llm = llm.with_structured_output(MindMapPlan, method="function_calling")
-
-    mind_map_plan: Optional[MindMapPlan] = None
-    nodes: List[str] = []
-    edge_tuples: List[Tuple[str, str]] = []
     try:
-        mind_map_plan = structured_llm.invoke(plan_messages)
-        nodes = list(dict.fromkeys([mind_map_plan.central_topic, *mind_map_plan.nodes]))
-        for edge in mind_map_plan.edges:
-            src = edge.get("source") or edge.get("from")
-            dst = edge.get("target") or edge.get("to")
-            if src and dst:
-                edge_tuples.append((src, dst))
+        context_response = llm.invoke(context_messages)
+        context_text = getattr(context_response, "content", "").strip()
     except Exception as exc:
-        logger.exception("Mind map planning failed", exc_info=exc)
-        text = f"Mind map generation failed while planning: {exc}"
+        logger.warning("Mind map context generation failed: %s", exc, exc_info=exc)
+        context_text = formatted_snippets or topic
+
+    if not context_text:
+        context_text = topic or "General overview"
+
+    # Step 2 & 3: plan nodes/edges with reflection-guided retries
+    structured_llm = llm.with_structured_output(MindMapPlan, method="function_calling")
+    reflection_feedback = "None"
+    plan: Optional[MindMapPlan] = None
+    reflection_reason = ""
+
+    for attempt in range(3):
+        blueprint_prompt = get_prompt("mind_map_blueprint").format(
+            topic=topic,
+            context=context_text,
+            notes=supervisor_notes or "None",
+            feedback=reflection_feedback,
+        )
+        blueprint_messages = [
+            SystemMessage(content="You design structured study mind maps."),
+            HumanMessage(content=blueprint_prompt),
+        ]
+        try:
+            candidate = structured_llm.invoke(blueprint_messages)
+        except Exception as exc:
+            reflection_feedback = (
+                "Previous attempt failed to return valid JSON schema. Ensure nodes and edge_map follow the instructions exactly."
+            )
+            logger.warning("Mind map blueprint attempt %s failed: %s", attempt + 1, exc)
+            continue
+
+        nodes = [name.strip() for name in candidate.nodes if name and name.strip()]
+        if topic and topic not in nodes:
+            nodes.insert(0, topic)
+        nodes = list(dict.fromkeys(nodes))[:12]
+
+        edges: List[Tuple[str, str]] = []
+        for pair in candidate.edge_map:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                src, dst = pair
+                if src and dst:
+                    src = src.strip()
+                    dst = dst.strip()
+                    if src and dst:
+                        edges.append((src, dst))
+
+        # Reflection step
+        edges_lines = "\n".join(f"{src} -> {dst}" for src, dst in edges[:20])
+        reflection_prompt = get_prompt("mind_map_reflection").format(
+            topic=topic,
+            context=context_text,
+            nodes=", ".join(nodes),
+            edges=edges_lines or "<none>",
+        )
+        try:
+            reflection_response = llm.invoke(
+                [SystemMessage(content="You evaluate mind maps for grounding."), HumanMessage(content=reflection_prompt)]
+            )
+            reflection_text = getattr(reflection_response, "content", "").strip()
+        except Exception as exc:
+            logger.warning("Mind map reflection failed: %s", exc, exc_info=exc)
+            reflection_text = "NO: reflection step failed"
+
+        if reflection_text.lower().startswith("yes") and nodes and edges:
+            plan = candidate
+            reflection_reason = reflection_text
+            break
+
+        reflection_feedback = reflection_text or "NO: please tighten the mapping to match the knowledge brief."
+
+    if not plan:
+        failure_text = "Mind map generation failed: the plan did not produce usable nodes and edges."
         update = state.copy()
         update.update(
             {
                 "awaiting_subagent": False,
-                "chat_response": text,
-                "last_answer": text,
+                "chat_response": failure_text,
+                "last_answer": failure_text,
                 "current_task": "mind_map",
                 "query_type": "mind_map",
                 "mind_map_data": None,
+                "mind_map_context": context_text,
                 "mind_map_url": None,
-                "mind_map_summary": None,
-                "last_search_payload": raw_results,
+                "image_url": None,
+                "last_search_payload": web_search,
                 "routing_notes": supervisor_notes,
                 "handoff_instructions": None,
-                "image_url": None,
             }
         )
-        update["messages"] = _append_assistant_message(state, text)
+        update["messages"] = _append_assistant_message(state, failure_text)
         return Command(goto="supervisor", update=update)
 
+    nodes = [name.strip() for name in plan.nodes if name and name.strip()]
+    if topic and topic not in nodes:
+        nodes.insert(0, topic)
+    nodes = list(dict.fromkeys(nodes))[:12]
+
+    edges: List[Tuple[str, str]] = []
+    for pair in plan.edge_map:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            src, dst = pair
+            if src and dst:
+                src = src.strip()
+                dst = dst.strip()
+                if src in nodes and dst in nodes and src != dst:
+                    edges.append((src, dst))
+
+    central = nodes[0] if nodes else topic
+    desired_min_edges = max(6, len(nodes) - 1)
+    if central and len(edges) < desired_min_edges:
+        existing = set(edges)
+        for node in nodes[1:]:
+            candidate = (central, node)
+            if candidate not in existing and central != node:
+                edges.append(candidate)
+                existing.add(candidate)
+                if len(edges) >= desired_min_edges:
+                    break
+
+    if not nodes or not edges:
+        failure_text = "Mind map generation failed: the plan did not produce usable nodes and edges."
+        update = state.copy()
+        update.update(
+            {
+                "awaiting_subagent": False,
+                "chat_response": failure_text,
+                "last_answer": failure_text,
+                "current_task": "mind_map",
+                "query_type": "mind_map",
+                "mind_map_data": None,
+                "mind_map_context": context_text,
+                "mind_map_url": None,
+                "image_url": None,
+                "last_search_payload": web_search,
+                "routing_notes": supervisor_notes,
+                "handoff_instructions": None,
+            }
+        )
+        update["messages"] = _append_assistant_message(state, failure_text)
+        return Command(goto="supervisor", update=update)
+
+    # Render image via tool
     graph_url: Optional[str] = None
     try:
-        tool_args = {"node_names": nodes, "edge_map": edge_tuples}
-        graph_url = create_mindmap_graph.invoke(tool_args)
+        graph_url = create_mindmap_graph.invoke({"node_names": nodes, "edge_map": edges})
     except Exception as exc:
         logger.warning("Mind map graph rendering failed: %s", exc, exc_info=exc)
-        graph_url = None
 
-    bullet_points = mind_map_plan.bullet_points or []
-    bullet_block = "\n".join(f"- {point}" for point in bullet_points) or "- No additional takeaways provided."
+    bullet_points_list = [point.strip() for point in plan.bullet_points if point and point.strip()]
+    if not bullet_points_list:
+        child_map: Dict[str, List[str]] = {}
+        for src, dst in edges:
+            child_map.setdefault(src, []).append(dst)
+        bullet_points_list = [f"{src}: {', '.join(children[:4])}" for src, children in child_map.items() if children]
+        if not bullet_points_list and nodes:
+            bullet_points_list = [f"Review the primary branches stemming from {nodes[0]}."]
+    bullet_points_text = "\n".join(f"- {text}" for text in bullet_points_list)
 
     summary_prompt = get_prompt("mind_map_summary").format(
-        topic=mind_map_plan.central_topic or query,
+        topic=nodes[0],
+        context=context_text,
         nodes=", ".join(nodes),
-        bullet_points=bullet_block,
+        bullet_points=bullet_points_text,
     )
 
-    summary_messages = [
-        SystemMessage(
-            content=(
-                "You are a supportive study coach explaining a newly generated mind map. "
-                "Keep the tone encouraging and actionable."
-            )
-        ),
-        HumanMessage(content=summary_prompt),
-    ]
-
     try:
-        summary_response = llm.invoke(summary_messages)
+        summary_response = llm.invoke(
+            [SystemMessage(content="Explain the mind map clearly."), HumanMessage(content=summary_prompt)]
+        )
         summary_text = getattr(summary_response, "content", "").strip()
     except Exception as exc:
         logger.warning("Mind map summary generation failed: %s", exc, exc_info=exc)
-        summary_text = "Here is a mind map covering the key ideas for the topic." + (
-            f"\n\nKey takeaways:\n{bullet_block}" if bullet_block else ""
-        )
+        summary_text = "Here is the mind map covering the key ideas. Follow each branch to explore the related subtopics."
 
     mind_map_data = {
-        "central_topic": mind_map_plan.central_topic,
-        "nodes": nodes,
-        "edges": [{"source": src, "target": dst} for src, dst in edge_tuples],
-        "bullet_points": bullet_points,
+        "node_names": nodes,
+        "edge_map": edges,
+        "bullet_points": bullet_points_list,
+        "reflection": reflection_reason,
     }
 
     update = state.copy()
@@ -693,17 +793,17 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
             "current_task": "mind_map",
             "query_type": "mind_map",
             "mind_map_data": mind_map_data,
+            "mind_map_context": context_text,
             "mind_map_summary": summary_text,
             "mind_map_url": graph_url,
             "image_url": graph_url,
-            "last_search_payload": raw_results,
+            "last_search_payload": web_search,
             "routing_notes": supervisor_notes,
             "handoff_instructions": None,
         }
     )
     update["messages"] = _append_assistant_message(state, summary_text)
     return Command(goto="supervisor", update=update)
-
 
 def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
     user_query = state.get("last_query", "")
