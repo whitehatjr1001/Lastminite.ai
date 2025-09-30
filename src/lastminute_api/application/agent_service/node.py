@@ -6,22 +6,25 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import requests
+from langchain.agents import AgentExecutor, create_react_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.prompts import PromptTemplate
 from langchain_core.tools import tool
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from lastminute_api.application.agent_service.prompts import get_prompt
 from lastminute_api.application.agent_service.state import AgentState as State
+from lastminute_api.domain.tools.registry import MINDMAP_STORE, create_mindmap, simple_mindmap
 from lastminute_api.infrastructure.llm_providers.base import get_llm_by_type
 from lastminute_api.infrastructure.mcp.mcp_agent import create_agent as create_mcp_agent
 from lastminute_api.infrastructure.nano_bannana.base import NanoBananaResult
-from lastminute_api.infrastructure.nano_bannana.openai import generate_openai_image_result
 from lastminute_api.infrastructure.nano_bannana.gemini import generate_gemini_image_result
-from lastminute_api.domain.tools.registry import create_mindmap_graph
+from lastminute_api.infrastructure.nano_bannana.openai import generate_openai_image_result
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,15 @@ def _preview(text: str, *, limit: int = 200) -> str:
     return cleaned if len(cleaned) <= limit else cleaned[: limit - 3] + "..."
 
 
+def _extract_reference_id(text: str) -> Optional[str]:
+    """Pull a stored mind map reference ID out of a response string."""
+
+    if not text:
+        return None
+    match = re.search(r"Reference:\s*([A-Za-z0-9_\-]+)", text)
+    return match.group(1) if match else None
+
+
 def _tavily_search(query: str, *, max_results: int = 4) -> Dict[str, object]:
     api_key = os.getenv("TAVILY_API_KEY") or os.getenv("TALVIY_API_KEY")
     if not api_key:
@@ -67,12 +79,16 @@ def _tavily_search(query: str, *, max_results: int = 4) -> Dict[str, object]:
     return response.json()
 
 
-def _format_tavily_results(result_payload: Dict[str, object], *, max_snippets: int = 3) -> str:
+def _format_tavily_results(
+    result_payload: Dict[str, object], *, max_snippets: int = 3, max_chars: int = 600
+) -> str:
     results = result_payload.get("results", []) if isinstance(result_payload, dict) else []
     snippets = []
     for idx, item in enumerate(results[:max_snippets], start=1):
         title = item.get("title", "") if isinstance(item, dict) else ""
         content = item.get("content") or item.get("snippet") or ""
+        if isinstance(content, str) and len(content) > max_chars:
+            content = content[: max_chars - 3] + "..."
         url = item.get("url", "")
         snippets.append(f"[{idx}] {title}\n{content}\nSource: {url}".strip())
     return "\n\n".join(snippets)
@@ -108,6 +124,38 @@ def _recent_user_messages(state: State, limit: int = 3) -> List[str]:
             if len(collected) >= limit:
                 break
     return list(reversed(collected))
+
+def get_conversation_history(state: State) -> str:
+    """Return the full conversation history as a formatted string."""
+    history = []
+    for message in state.get("messages", []):
+        role = getattr(message, "type", None) or getattr(message, "role", None)
+        content = getattr(message, "content", "")
+        if isinstance(message, dict):
+            role = message.get("role", role)
+            content = message.get("content", content)
+        if role and content:
+            history.append(f"{role.capitalize()}: {content}")
+    return "\n".join(history)
+
+
+def _compose_handoff_instructions(*, action: str, query: str, rationale: str, state: State) -> str:
+    """Summarise the supervisor intent for a downstream worker."""
+
+    sections: List[str] = [f"Action: {action}", f"User request: {query}"]
+
+    if rationale:
+        sections.append(f"Supervisor rationale: {rationale}")
+
+    recent_user = _recent_user_messages(state, limit=2)
+    if recent_user:
+        sections.extend(["Recent user turns:", *recent_user])
+
+    recent_answer = state.get("last_answer")
+    if recent_answer:
+        sections.append(f"Previous assistant summary: {_preview(str(recent_answer))}")
+
+    return "\n".join(sections)
 
 
 def _build_grounded_messages(
@@ -256,15 +304,6 @@ class SupervisorDecision(BaseModel):
     rationale: str = Field(description="Short reasoning for audit logging")
 
 
-class MindMapPlan(BaseModel):
-    """Structured mind map output returned by the planning LLM."""
-
-    central_topic: str
-    nodes: List[str]
-    edge_map: List[List[str]]
-    bullet_points: List[str] = Field(default_factory=list)
-
-
 
 # ---------------------------------------------------------------------------
 # Supervisor
@@ -276,11 +315,14 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     logger.debug("Supervisor invoked with state keys: %s", list(state.keys()))
 
     if not state.get("awaiting_subagent") and state.get("chat_response") and not state.get("final_response_sent"):
-        messages = _append_assistant_message(state, state["chat_response"], ensure_unique=True)
+        final_answer = str(state.get("chat_response", "")).strip()
+        state["chat_response"] = final_answer
+        logger.debug("Supervisor final answer: %s", _preview(final_answer))
+        messages = _append_assistant_message(state, final_answer, ensure_unique=True)
         update = {
             "messages": messages,
             "final_response_sent": True,
-            "last_answer": state["chat_response"],
+            "last_answer": final_answer,
             "awaiting_subagent": False,
         }
         return Command(goto="__end__", update=update)
@@ -303,22 +345,17 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
             content = message.get("content", content)
         history_snippets.append(f"{role}: {content}")
 
+    system_content = "\n\n".join([get_prompt("supervisor_system"), get_prompt("router")])
+    history_text = "\n".join(history_snippets) if history_snippets else "<none>"
+    router_payload = get_prompt("router_human").format(
+        history=history_text,
+        user_query=query,
+        notes=state.get("routing_notes", "<none>"),
+    )
+
     supervisor_messages = [
-        SystemMessage(
-            content=(
-                "You are the supervisor for the LastMinute multi-agent system. "
-                "Choose one action: simple_answer, quick_search, deep_research, image_generation, mind_map. "
-                "Return a refined query for the selected worker and a concise rationale."
-            )
-        ),
-        HumanMessage(
-            content=(
-                "Conversation history (last turns):\n"
-                + ("\n".join(history_snippets) if history_snippets else "<none>")
-                + "\n\nUser query:\n"
-                + query
-            )
-        ),
+        SystemMessage(content=system_content),
+        HumanMessage(content=router_payload),
     ]
 
     decision = structured_router.invoke(supervisor_messages)
@@ -330,13 +367,11 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     if decision.action == "simple_answer":
         logger.debug("🗣️ Simple answer handoff query: %s", _preview(handoff_query))
 
-        system_content = (
-            "You are the LastMinute supervisor responding directly to the user. "
-            "Answer the question factually, acknowledge uncertainty when needed, and do not "
-            "ask the user to restate their request."
+        system_content = get_prompt("supervisor_system")
+        guidance = get_prompt("simple_answer").format(
+            question=handoff_query,
+            notes=supervisor_notes or "None",
         )
-
-        guidance = get_prompt("simple_answer").format(input=handoff_query)
         messages = _build_grounded_messages(
             system_content=system_content,
             state=state,
@@ -362,6 +397,12 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
 
     if decision.action == "mind_map":
         logger.debug("🗺️ Mind map handoff query: %s", _preview(handoff_query))
+        instructions = _compose_handoff_instructions(
+            action="mind_map",
+            query=handoff_query,
+            rationale=supervisor_notes,
+            state=state,
+        )
         update = {
             "query_type": "mind_map",
             "current_task": "mind_map",
@@ -369,7 +410,7 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
             "final_response_sent": False,
             "chat_response": None,
             "routing_notes": supervisor_notes,
-            "handoff_instructions": supervisor_notes,
+            "handoff_instructions": instructions,
         }
         return custom_handoff_tool.invoke(
             {
@@ -381,6 +422,12 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
 
     if decision.action == "quick_search":
         logger.debug("🔎 Quick search handoff query: %s", _preview(handoff_query))
+        instructions = _compose_handoff_instructions(
+            action="quick_search",
+            query=handoff_query,
+            rationale=supervisor_notes,
+            state=state,
+        )
         update = {
             "query_type": "quick_search",
             "current_task": "quick_search",
@@ -388,7 +435,7 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
             "final_response_sent": False,
             "chat_response": None,
             "routing_notes": supervisor_notes,
-            "handoff_instructions": supervisor_notes,
+            "handoff_instructions": instructions,
         }
         return custom_handoff_tool.invoke(
             {
@@ -401,10 +448,17 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
     if decision.action == "deep_research":
         logger.debug("🧠 Deep research handoff query: %s", _preview(handoff_query))
         prompt = get_prompt("deep_research_brief").format(
-            input=f"{handoff_query}\n\nSupervisor notes: {supervisor_notes or 'N/A'}"
+            query=handoff_query,
+            rationale=supervisor_notes or "None",
         )
         brief_response = llm.invoke([HumanMessage(content=prompt)])
         research_brief = getattr(brief_response, "content", "").strip()
+        instructions = _compose_handoff_instructions(
+            action="deep_research",
+            query=handoff_query,
+            rationale=supervisor_notes,
+            state=state,
+        )
         update = {
             "query_type": "deep_research",
             "current_task": "deep_research",
@@ -413,7 +467,7 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
             "mcp_query": research_brief,
             "chat_response": None,
             "routing_notes": supervisor_notes,
-            "handoff_instructions": supervisor_notes,
+            "handoff_instructions": instructions,
         }
         return custom_handoff_tool.invoke(
             {
@@ -424,6 +478,12 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
         )
 
     # image_generation
+    instructions = _compose_handoff_instructions(
+        action="image_generation",
+        query=handoff_query,
+        rationale=supervisor_notes,
+        state=state,
+    )
     update = {
         "query_type": "image_generation",
         "current_task": "image_generation",
@@ -432,7 +492,7 @@ def supervisor_node(state: State) -> Command[Literal["tavily_agent", "mcp_agent"
         "image_prompt": handoff_query,
         "chat_response": None,
         "routing_notes": supervisor_notes,
-        "handoff_instructions": supervisor_notes,
+        "handoff_instructions": instructions,
     }
     return custom_handoff_tool.invoke(
         {
@@ -467,6 +527,7 @@ def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
             guidance = get_prompt("quick_search_summary").format(
                 query=query,
                 search_results=formatted,
+                notes=supervisor_notes or "None",
             )
             messages = _build_grounded_messages(
                 system_content=system_content,
@@ -485,7 +546,10 @@ def tavily_agent_node(state: State) -> Command[Literal["supervisor"]]:
                 "You are the LastMinute supervisor responding without snippets. Provide the best concise answer you can, "
                 "flagging any uncertainty, and do not ask the user to restate their request."
             )
-            guidance = get_prompt("simple_answer").format(input=query)
+            guidance = get_prompt("simple_answer").format(
+                question=query,
+                notes=supervisor_notes or "None",
+            )
             messages = _build_grounded_messages(
                 system_content=system_content,
                 state=state,
@@ -573,237 +637,98 @@ async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
 
 def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
-    """Generate a mind map plan and image from the user query and context."""
+    """Generate a grounded mind map and return a lightweight reference."""
 
-    topic = state.get("last_query", "").strip()
-    supervisor_notes = state.get("handoff_instructions") or state.get("routing_notes") or ""
-    logger.info("🗺️ Mind map agent received: %s", _preview(topic))
+    topic = (state.get("mind_map_instruction") or state.get("last_query") or "").strip()
+    supervisor_notes = (state.get("handoff_instructions") or state.get("routing_notes") or "").strip()
 
-    try:
-        web_search = _tavily_search(topic, max_results=6)
-    except Exception as exc:  # pragma: no cover - network failure branch
-        logger.warning("Mind map Tavily search failed: %s", exc)
-        web_search = {"results": []}
+    logger.info("🗺️ Mind map agent received: %s", _preview(topic or supervisor_notes))
 
-    formatted_snippets = _format_tavily_results(web_search, max_snippets=6)
+    search_payload: Dict[str, object] = {}
+    search_notes = ""
+    search_query = topic or supervisor_notes
+
+    if search_query:
+        try:
+            search_payload = _tavily_search(search_query, max_results=6)
+            search_notes = _format_tavily_results(search_payload, max_snippets=5, max_chars=1000)
+        except Exception as exc:  # pragma: no cover - network failure branch
+            logger.warning("Mind map Tavily search failed: %s", exc)
+
+    knowledge_block = search_notes or "No external snippets were available; rely on user context and prior turns."
+
     llm = get_llm_by_type("openai")
-
-    # Step 1: build a concise knowledge report
-    context_prompt = get_prompt("mind_map_context").format(
-        topic=topic,
-        notes=supervisor_notes or "None",
-        snippets=formatted_snippets or "<no snippets>",
+    prompt = PromptTemplate.from_template(get_prompt("reference_mindmap_prompt"))
+    react_agent = create_react_agent(
+        llm=llm,
+        tools=[create_mindmap, simple_mindmap],
+        prompt=prompt,
     )
-    context_messages = [
-        SystemMessage(content="You turn search results into concise revision notes."),
-        HumanMessage(content=context_prompt),
-    ]
-    try:
-        context_response = llm.invoke(context_messages)
-        context_text = getattr(context_response, "content", "").strip()
-    except Exception as exc:
-        logger.warning("Mind map context generation failed: %s", exc, exc_info=exc)
-        context_text = formatted_snippets or topic
 
-    if not context_text:
-        context_text = topic or "General overview"
+    executor = AgentExecutor(
+        agent=react_agent,
+        tools=[create_mindmap, simple_mindmap],
+        verbose=False,
+        handle_parsing_errors=True,
+        max_iterations=5,
+    )
 
-    # Step 2 & 3: plan nodes/edges with reflection-guided retries
-    structured_llm = llm.with_structured_output(MindMapPlan, method="function_calling")
-    reflection_feedback = "None"
-    plan: Optional[MindMapPlan] = None
-    reflection_reason = ""
-
-    for attempt in range(3):
-        blueprint_prompt = get_prompt("mind_map_blueprint").format(
-            topic=topic,
-            context=context_text,
-            notes=supervisor_notes or "None",
-            feedback=reflection_feedback,
-        )
-        blueprint_messages = [
-            SystemMessage(content="You design structured study mind maps."),
-            HumanMessage(content=blueprint_prompt),
+    agent_input = "\n".join(
+        [
+            f"Create a mind map for: {topic or 'general study topic'}",
+            f"Supervisor guidance: {supervisor_notes or 'N/A'}",
+            "Grounding notes:",
+            knowledge_block,
         ]
-        try:
-            candidate = structured_llm.invoke(blueprint_messages)
-        except Exception as exc:
-            reflection_feedback = (
-                "Previous attempt failed to return valid JSON schema. Ensure nodes and edge_map follow the instructions exactly."
-            )
-            logger.warning("Mind map blueprint attempt %s failed: %s", attempt + 1, exc)
-            continue
-
-        nodes = [name.strip() for name in candidate.nodes if name and name.strip()]
-        if topic and topic not in nodes:
-            nodes.insert(0, topic)
-        nodes = list(dict.fromkeys(nodes))[:12]
-
-        edges: List[Tuple[str, str]] = []
-        for pair in candidate.edge_map:
-            if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                src, dst = pair
-                if src and dst:
-                    src = src.strip()
-                    dst = dst.strip()
-                    if src and dst:
-                        edges.append((src, dst))
-
-        # Reflection step
-        edges_lines = "\n".join(f"{src} -> {dst}" for src, dst in edges[:20])
-        reflection_prompt = get_prompt("mind_map_reflection").format(
-            topic=topic,
-            context=context_text,
-            nodes=", ".join(nodes),
-            edges=edges_lines or "<none>",
-        )
-        try:
-            reflection_response = llm.invoke(
-                [SystemMessage(content="You evaluate mind maps for grounding."), HumanMessage(content=reflection_prompt)]
-            )
-            reflection_text = getattr(reflection_response, "content", "").strip()
-        except Exception as exc:
-            logger.warning("Mind map reflection failed: %s", exc, exc_info=exc)
-            reflection_text = "NO: reflection step failed"
-
-        if reflection_text.lower().startswith("yes") and nodes and edges:
-            plan = candidate
-            reflection_reason = reflection_text
-            break
-
-        reflection_feedback = reflection_text or "NO: please tighten the mapping to match the knowledge brief."
-
-    if not plan:
-        failure_text = "Mind map generation failed: the plan did not produce usable nodes and edges."
-        update = state.copy()
-        update.update(
-            {
-                "awaiting_subagent": False,
-                "chat_response": failure_text,
-                "last_answer": failure_text,
-                "current_task": "mind_map",
-                "query_type": "mind_map",
-                "mind_map_data": None,
-                "mind_map_context": context_text,
-                "mind_map_url": None,
-                "image_url": None,
-                "last_search_payload": web_search,
-                "routing_notes": supervisor_notes,
-                "handoff_instructions": None,
-            }
-        )
-        update["messages"] = _append_assistant_message(state, failure_text)
-        return Command(goto="supervisor", update=update)
-
-    nodes = [name.strip() for name in plan.nodes if name and name.strip()]
-    if topic and topic not in nodes:
-        nodes.insert(0, topic)
-    nodes = list(dict.fromkeys(nodes))[:12]
-
-    edges: List[Tuple[str, str]] = []
-    for pair in plan.edge_map:
-        if isinstance(pair, (list, tuple)) and len(pair) == 2:
-            src, dst = pair
-            if src and dst:
-                src = src.strip()
-                dst = dst.strip()
-                if src in nodes and dst in nodes and src != dst:
-                    edges.append((src, dst))
-
-    central = nodes[0] if nodes else topic
-    desired_min_edges = max(6, len(nodes) - 1)
-    if central and len(edges) < desired_min_edges:
-        existing = set(edges)
-        for node in nodes[1:]:
-            candidate = (central, node)
-            if candidate not in existing and central != node:
-                edges.append(candidate)
-                existing.add(candidate)
-                if len(edges) >= desired_min_edges:
-                    break
-
-    if not nodes or not edges:
-        failure_text = "Mind map generation failed: the plan did not produce usable nodes and edges."
-        update = state.copy()
-        update.update(
-            {
-                "awaiting_subagent": False,
-                "chat_response": failure_text,
-                "last_answer": failure_text,
-                "current_task": "mind_map",
-                "query_type": "mind_map",
-                "mind_map_data": None,
-                "mind_map_context": context_text,
-                "mind_map_url": None,
-                "image_url": None,
-                "last_search_payload": web_search,
-                "routing_notes": supervisor_notes,
-                "handoff_instructions": None,
-            }
-        )
-        update["messages"] = _append_assistant_message(state, failure_text)
-        return Command(goto="supervisor", update=update)
-
-    # Render image via tool
-    graph_url: Optional[str] = None
-    try:
-        graph_url = create_mindmap_graph.invoke({"node_names": nodes, "edge_map": edges})
-    except Exception as exc:
-        logger.warning("Mind map graph rendering failed: %s", exc, exc_info=exc)
-
-    bullet_points_list = [point.strip() for point in plan.bullet_points if point and point.strip()]
-    if not bullet_points_list:
-        child_map: Dict[str, List[str]] = {}
-        for src, dst in edges:
-            child_map.setdefault(src, []).append(dst)
-        bullet_points_list = [f"{src}: {', '.join(children[:4])}" for src, children in child_map.items() if children]
-        if not bullet_points_list and nodes:
-            bullet_points_list = [f"Review the primary branches stemming from {nodes[0]}."]
-    bullet_points_text = "\n".join(f"- {text}" for text in bullet_points_list)
-
-    summary_prompt = get_prompt("mind_map_summary").format(
-        topic=nodes[0],
-        context=context_text,
-        nodes=", ".join(nodes),
-        bullet_points=bullet_points_text,
     )
 
-    try:
-        summary_response = llm.invoke(
-            [SystemMessage(content="Explain the mind map clearly."), HumanMessage(content=summary_prompt)]
-        )
-        summary_text = getattr(summary_response, "content", "").strip()
-    except Exception as exc:
-        logger.warning("Mind map summary generation failed: %s", exc, exc_info=exc)
-        summary_text = "Here is the mind map covering the key ideas. Follow each branch to explore the related subtopics."
+    mind_map_summary = ""
+    mind_map_reference = None
 
-    mind_map_data = {
-        "node_names": nodes,
-        "edge_map": edges,
-        "bullet_points": bullet_points_list,
-        "reflection": reflection_reason,
+    try:
+        result = executor.invoke({"input": agent_input})
+    except Exception as exc:  # pragma: no cover - agent execution failure
+        logger.exception("Mind map agent execution failed")
+        mind_map_summary = f"Mind map generation failed: {exc}"
+    else:
+        if isinstance(result, dict):
+            mind_map_summary = str(result.get("output", "")).strip()
+        else:
+            mind_map_summary = str(result).strip()
+
+    mind_map_reference = _extract_reference_id(mind_map_summary)
+
+    mind_map_image = None
+    if mind_map_reference:
+        if mind_map_reference in MINDMAP_STORE:
+            mind_map_image = MINDMAP_STORE[mind_map_reference].get("base64")
+        mind_map_summary = (
+            f"{mind_map_summary}\n\nUse `display_mindmap('{mind_map_reference}')` to open the cached diagram."
+        ).strip()
+
+    if not mind_map_summary:
+        mind_map_summary = "Unable to generate a mind map summary at this time."
+
+    update = {
+        "awaiting_subagent": False,
+        "chat_response": mind_map_summary,
+        "last_answer": mind_map_summary,
+        "current_task": "mind_map",
+        "query_type": "mind_map",
+        "mind_map_instruction": topic,
+        "mind_map_summary": mind_map_summary,
+        "mind_map_reference": mind_map_reference,
+        "mind_map_url": mind_map_image,
+        "image_url": mind_map_image,
+        "last_search_payload": search_payload,
+        "routing_notes": supervisor_notes,
+        "handoff_instructions": None,
+        "final_response_sent": False,
     }
-
-    update = state.copy()
-    update.update(
-        {
-            "awaiting_subagent": False,
-            "chat_response": summary_text,
-            "last_answer": summary_text,
-            "current_task": "mind_map",
-            "query_type": "mind_map",
-            "mind_map_data": mind_map_data,
-            "mind_map_context": context_text,
-            "mind_map_summary": summary_text,
-            "mind_map_url": graph_url,
-            "image_url": graph_url,
-            "last_search_payload": web_search,
-            "routing_notes": supervisor_notes,
-            "handoff_instructions": None,
-        }
-    )
-    update["messages"] = _append_assistant_message(state, summary_text)
+    update["messages"] = _append_assistant_message(state, mind_map_summary)
     return Command(goto="supervisor", update=update)
+
+
 
 def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
     user_query = state.get("last_query", "")
@@ -817,7 +742,10 @@ def image_generation_node(state: State) -> Command[Literal["supervisor"]]:
         "You are the LastMinute visual imagination agent. Craft a single vivid, safe prompt for an educational diagram. "
         "Do not ask the user for more input. Mention key entities, relationships, colours, and layout in one paragraph."
     )
-    guidance = get_prompt("image_generation").format(input=base_prompt)
+    guidance = get_prompt("image_generation").format(
+        prompt=base_prompt,
+        notes=supervisor_notes or "None",
+    )
     messages = _build_grounded_messages(
         system_content=system_content,
         state=state,

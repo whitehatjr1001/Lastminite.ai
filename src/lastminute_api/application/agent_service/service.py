@@ -112,6 +112,7 @@ def summarise_agent_result(state: Mapping[str, Any]) -> Dict[str, Any]:
         "answer": state.get("last_answer"),
         "image_url": state.get("image_url"),
         "query_type": state.get("query_type"),
+        "mind_map_reference": state.get("mind_map_reference"),
         "messages": list(state.get("messages", [])),
     }
 
