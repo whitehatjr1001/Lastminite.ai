@@ -1,6 +1,4 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/persnol-projects/assets/main/lastminuteai/logo.svg" alt="Lastminute.ai Logo" width="220"/>
-</div>
+<div id="top"></div>
 
 # Lastminute.ai
 
