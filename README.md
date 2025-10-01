@@ -43,6 +43,10 @@ cp .env.example .env               # add OPENAI_API_KEY, TAVILY_API_KEY, optiona
 uv run chainlit run interface/chainlit_ui.py
 ```
 
+### Demo
+
+<video src="assets/lastminute-ai-demo.mp4" controls width="100%" title="Lastminute.ai Demo"></video>
+
 Example scripts (logging-heavy):
 
 ```bash
