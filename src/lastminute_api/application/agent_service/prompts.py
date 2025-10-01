@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Dict
 
-from langchain_core.messages import HumanMessage
-
 PROMPT_MAPPER: Dict[str, str] = {
     "supervisor_system": (
         "You are the LastMinute supervisor. Coordinate specialist agents, keep answers factual, "
@@ -56,12 +54,6 @@ PROMPT_MAPPER: Dict[str, str] = {
         "Answer: concise response (<=4 sentences) referencing snippet indices like [1].\n"
         "If evidence is thin, recommend the next best action in one sentence."
     ),
-    "mind_map_react": (
-        "You are the LastMinute mind-map agent following the ReAct pattern. Available tool: "
-        "`create_mindmap_graph(node_names: List[str], edge_map: List[List[str]])`. Think aloud with `Thought:` when "
-        "planning nodes and edges, call the tool once you have a clear structure, and finish with `Answer:` summarising "
-        "the map. Always include a line `Mind map URL: <tool output>` when the tool returns an image data URI."
-    ),
     "image_generation": (
         "## Image Prompt Builder\n"
         "Base request: {prompt}\n"
@@ -69,42 +61,6 @@ PROMPT_MAPPER: Dict[str, str] = {
         "Thought: identify scene, key entities, relationships, perspective, and stylistic choices.\n"
         "Answer: deliver a single paragraph prompt highlighting subject, layout, labels, lighting, colours, and safety constraints."
     ),
-    "reference_mindmap_prompt" : (
-        """🧠 MINDMAP SPECIALIST - Reference-Based System
-
-        Tools: {tools}
-        Available: {tool_names}
-
-        You create mindmaps that return REFERENCE IDs instead of large data.
-
-        FORMAT:
-        Question: {input}
-        Thought: [plan approach]
-        Action: [tool name]
-        Action Input: [input format]
-        Observation: [reference result]
-        Final Answer: [tell user about their mindmap reference]
-
-        TOOL FORMATS:
-
-        ✅ create_mindmap (recommended):
-        Input: "Python: Variables, Functions, Classes, Libraries"
-        Output: "✅ Mindmap 'Python' created! Reference: mm_123456_abc"
-
-        ✅ simple_mindmap:
-        Input: topic="Python Programming", subtopics="Variables,Functions,Classes"
-        Output: "✅ Simple mindmap 'Python Programming' ready! Reference: mm_789012_def"
-
-        EXAMPLES:
-        - "Machine Learning: Supervised, Unsupervised, Deep Learning, Neural Networks"
-        - "Web Development: HTML, CSS, JavaScript, React, Node.js"
-
-        Return the reference ID to the user - they can view the actual mindmap using the reference.
-
-        Question: {input}
-        Thought: {agent_scratchpad}
-        """
-    )
 }
 
 def get_prompt(prompt_name: str) -> str:
@@ -112,14 +68,3 @@ def get_prompt(prompt_name: str) -> str:
         return PROMPT_MAPPER[prompt_name]
     except KeyError as exc:  # pragma: no cover - defensive guard
         raise ValueError(f"Unknown prompt '{prompt_name}'") from exc
-
-
-def apply_prompt(prompt_name: str, **kwargs) -> str:
-    template = get_prompt(prompt_name)
-    if "messages" in kwargs and isinstance(kwargs["messages"], list):
-        kwargs = dict(kwargs)
-        kwargs["messages"] = "\n".join([msg.content for msg in kwargs["messages"]])
-    kwargs.setdefault("input", HumanMessage(content="Hello"))
-    kwargs.setdefault("text_answer", "")
-    kwargs.setdefault("image_url", "")
-    return template.format(**kwargs)

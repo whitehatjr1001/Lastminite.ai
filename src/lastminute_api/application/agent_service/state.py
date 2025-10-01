@@ -11,8 +11,7 @@ class AgentState(MessagesState):
 
     Attributes:
         last_query (str): The most recent user query.
-        query_type (Literal): Classifies query as 'quick_search' or 'complex_search'.
-        continue_session (bool): Whether user wants to continue revision session.
+        query_type (Literal): Classifies query type for routing decisions.
         last_answer (Optional[str]): Last generated textual answer.
         mind_map_instruction (Optional[str]): Supervisor-provided topic or framing for the mind map.
         mind_map_url (Optional[str]): Data URL of the rendered mind map image.
@@ -23,7 +22,6 @@ class AgentState(MessagesState):
 
     last_query: str = ""
     query_type: Optional[Literal["simple_answer", "quick_search", "deep_research", "image_generation", "mind_map"]] = None
-    continue_session: bool = False
     last_answer: Optional[str] = None
     current_task: Optional[str] = None
     mind_map_instruction: Optional[str] = None
