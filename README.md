@@ -9,12 +9,13 @@ LangGraph supervisor orchestrating multiple specialist agents—quick search, de
 ## 🎥 Live Demo
 
 <div align="center">
-  
-https://github.com/whitehatjr1001/Lastminite.ai/raw/master/assets/lastminute-ai-demo.mp4
-
-*Multi-agent chatbot with supervisor architecture - Deep research • Quick search • Image generation • Mindmap creation*
-
+<div align="center">
+  <video width="800" height="450" controls>
+    <source src="https://github.com/whitehatjr1001/Lastminite.ai/raw/master/assets/lastminute-ai-demo.mp4" type="video/mp4">
+    Your browser does not support the video tag.
+  </video>
 </div>
+
 
 ## ⚡ Key Features
 - **🔍 Research Agent**: Deep information gathering and analysis
