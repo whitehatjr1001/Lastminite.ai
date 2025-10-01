@@ -13,7 +13,6 @@ class AgentState(MessagesState):
         last_query (str): The most recent user query.
         query_type (Literal): Classifies query type for routing decisions.
         last_answer (Optional[str]): Last generated textual answer.
-        mind_map_instruction (Optional[str]): Supervisor-provided topic or framing for the mind map.
         mind_map_url (Optional[str]): Data URL of the rendered mind map image.
         mind_map_summary (Optional[str]): Narrative explanation of the mind map.
         mind_map_reference (Optional[str]): Reference ID pointing to a cached mind map asset.
@@ -24,7 +23,6 @@ class AgentState(MessagesState):
     query_type: Optional[Literal["simple_answer", "quick_search", "deep_research", "image_generation", "mind_map"]] = None
     last_answer: Optional[str] = None
     current_task: Optional[str] = None
-    mind_map_instruction: Optional[str] = None
     mind_map_url: Optional[str] = None
     mind_map_summary: Optional[str] = None
     mind_map_reference: Optional[str] = None

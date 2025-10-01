@@ -704,40 +704,38 @@ async def mcp_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
 
 def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
-    """Generate a grounded mind map and return a lightweight reference."""
+    """Generate a mind map summary plus cached diagram reference."""
 
-    topic = (state.get("mind_map_instruction") or state.get("last_query") or "").strip()
+    user_query = state.get("last_query", "").strip()
     supervisor_notes = (state.get("handoff_instructions") or state.get("routing_notes") or "").strip()
 
-    logger.info("🗺️ Mind map agent received: %s", _preview(topic or supervisor_notes))
+    logger.info("🗺️ Mind map agent received: %s", _preview(user_query or supervisor_notes))
 
-    search_payload: Dict[str, object] = {}
     search_notes = ""
-    search_query = topic or supervisor_notes
-
-    if search_query:
+    search_seed = supervisor_notes or user_query
+    if search_seed:
         try:
-            search_payload = _tavily_search(search_query, max_results=6)
-            search_notes = _format_tavily_results(search_payload, max_snippets=5, max_chars=1000)
+            payload = _tavily_search(search_seed, max_results=6)
+            search_notes = _format_tavily_results(payload, max_snippets=5, max_chars=900)
         except Exception as exc:  # pragma: no cover - network failure branch
-            logger.warning("Mind map Tavily search failed: %s", exc)
+            logger.debug("Mind map Tavily search failed: %s", exc)
 
-    knowledge_block = search_notes or "No external snippets were available; rely on user context and prior turns."
+    knowledge_notes = search_notes or "No external snippets were available; rely on core knowledge."
 
     llm = get_llm_by_type("openai")
-
-    outline_prompt = (
-        "Summarise the topic and notes into JSON with keys 'topic' and 'subtopics'. "
-        "Return only JSON. Limit subtopics to concise phrases (<=4 words)."
-    )
     outline_messages = [
-        SystemMessage(content=outline_prompt),
+        SystemMessage(
+            content=(
+                "Summarise the study request into JSON: {\"topic\": str, \"subtopics\": [..]}. "
+                "Return only JSON. Keep subtopics short (<=4 words)."
+            )
+        ),
         HumanMessage(
             content=(
-                f"Topic: {topic or 'Not provided'}\n"
+                f"Topic clue: {user_query or 'Not provided'}\n"
                 f"Supervisor notes: {supervisor_notes or 'None'}\n"
                 "Supporting knowledge:\n"
-                f"{knowledge_block}"
+                f"{knowledge_notes}"
             )
         ),
     ]
@@ -745,33 +743,24 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
     outline_topic: Optional[str] = None
     outline_subtopics: List[str] = []
     try:
-        outline_response = llm.invoke(outline_messages)
-        outline_text = _clean_text_block(getattr(outline_response, "content", ""))
-        outline_topic, outline_subtopics = _parse_outline_json(outline_text)
+        outline_reply = llm.invoke(outline_messages)
+        outline_topic, outline_subtopics = _parse_outline_json(
+            _clean_text_block(getattr(outline_reply, "content", ""))
+        )
     except Exception:  # pragma: no cover - outline failure
         logger.debug("Mind map outline generation failed", exc_info=True)
 
-    topic_name = outline_topic or topic or search_query or "Study Topic"
-    subtopics = outline_subtopics or _derive_subtopics(
-        topic_name,
-        supervisor_notes,
-        knowledge_block,
-    )
-
+    topic_name = outline_topic or user_query or search_seed or "Study Topic"
+    subtopics = outline_subtopics or _derive_subtopics(topic_name, supervisor_notes, knowledge_notes)
     serialized = ", ".join(subtopics[:8]) or topic_name
 
     try:
         result_text = str(create_mindmap.invoke(f"{topic_name}: {serialized}")).strip()
     except Exception as exc:  # pragma: no cover - fallback to simple mind map
-        logger.warning("create_mindmap failed, retrying with simple_mindmap", exc_info=True)
+        logger.debug("create_mindmap failed, retrying simple variant", exc_info=True)
         try:
             result_text = str(
-                simple_mindmap.invoke(
-                    {
-                        "topic": topic_name,
-                        "subtopics": ",".join(subtopics[:6]),
-                    }
-                )
+                simple_mindmap.invoke({"topic": topic_name, "subtopics": ",".join(subtopics[:6])})
             ).strip()
         except Exception as final_exc:  # pragma: no cover - both tools failed
             logger.exception("Mind map generation failed")
@@ -779,8 +768,8 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
 
     result_text = _clean_text_block(result_text)
     mind_map_reference = _extract_reference_id(result_text)
-    mind_map_summary = result_text
     mind_map_url: Optional[str] = None
+    mind_map_summary = result_text or "Unable to generate a mind map summary at this time."
 
     if mind_map_reference:
         try:
@@ -791,19 +780,12 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
         if isinstance(mind_map_url, str) and mind_map_url.startswith("Reference not found"):
             mind_map_url = None
 
-        overview_lines = [
-            f"Here's the study outline for {topic_name}:",
-            "",
-        ]
-        for item in subtopics[:8]:
-            overview_lines.append(f"- {item}")
-
-        overview_lines.append("")
-        overview_lines.append(f"Reference ID for later viewing: {mind_map_reference}")
-        mind_map_summary = "\n".join(overview_lines).strip()
-
-    if not mind_map_summary:
-        mind_map_summary = "Unable to generate a mind map summary at this time."
+        summary_lines = [f"Mind map outline for {topic_name}:", ""]
+        summary_lines.extend(f"- {item}" for item in subtopics[:8])
+        summary_lines.extend(
+            ["", f"Reference ID: {mind_map_reference}", "Use `display_mindmap` to view the cached diagram."]
+        )
+        mind_map_summary = "\n".join(summary_lines).strip()
 
     update = {
         "awaiting_subagent": False,
@@ -811,12 +793,10 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
         "last_answer": mind_map_summary,
         "current_task": "mind_map",
         "query_type": "mind_map",
-        "mind_map_instruction": topic,
         "mind_map_summary": mind_map_summary,
         "mind_map_reference": mind_map_reference,
         "mind_map_url": mind_map_url,
         "image_url": mind_map_url,
-        "last_search_payload": search_payload,
         "routing_notes": supervisor_notes,
         "handoff_instructions": None,
         "final_response_sent": False,
