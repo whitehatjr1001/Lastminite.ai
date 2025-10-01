@@ -5,28 +5,24 @@
 LangGraph supervisor orchestrating multiple specialist agents—quick search, deep MCP research, mind-map synthesis, and image generation—to answer revision-style prompts. Today it ships with a Chainlit playground; a FastAPI + React surface is on the roadmap.
 
 ---
-## 🎥 Lastminute AI Demo
+
+## 🎥 Live Demo
 
 <div align="center">
-  <video width="800" height="450" controls>
-    <source src="assets/lastminute-ai-demo.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
+  
+https://github.com/whitehatjr1001/Lastminite.ai/raw/master/assets/lastminute-ai-demo.mp4
+
+*Multi-agent chatbot with supervisor architecture - Deep research • Quick search • Image generation • Mindmap creation*
+
 </div>
 
-*Watch our multi-agent system in action: deep research, quick search, image generation, and mindmap creation with Chainlit UI*
+## ⚡ Key Features
+- **🔍 Research Agent**: Deep information gathering and analysis
+- **⚡ Quick Search**: Real-time query processing  
+- **🎨 Image Generation**: AI-powered visual content
+- **🗺️ Mindmap Creation**: Knowledge visualization
+- **💬 Chainlit UI**: Interactive chat interface
 
-### Feature Demos
-
-#### 🔍 Research Agent
-<video width="600" height="400" controls>
-  <source src="assets/research-demo.mp4" type="video/mp4">
-</video>
-
-#### 🎨 Image Generation  
-<video width="600" height="400" controls>
-  <source src="assets/image-demo.mp4" type="video/mp4">
-</video>
 
 
 ## Tech Stack
