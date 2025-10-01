@@ -45,11 +45,9 @@ uv run chainlit run interface/chainlit_ui.py
 
 ### Demo
 
-> GitHub does not stream large MP4s inline, so use the download link below to watch the walk-through.
+![Lastminute.ai demo](assets/lastminute-ai-demo.gif)
 
-- [▶️ Watch the Chainlit demo](assets/lastminute-ai-demo.mp4)
-
-Once downloaded, open it locally to see agent routing, mind-map creation, and PNG playback end-to-end.
+Prefer full resolution with audio? [Download the MP4](assets/lastminute-ai-demo.mp4).
 
 Example scripts (logging-heavy):
 
