@@ -1,109 +1,125 @@
-# Agent API
+<div align="center">
+  <img src="https://raw.githubusercontent.com/persnol-projects/assets/main/lastminuteai/logo.svg" alt="Lastminute.ai Logo" width="220"/>
+</div>
 
-A LangGraph-powered orchestration layer that coordinates several specialist agents to answer revision-style questions, fetch fresh facts, run deep MCP research, and draft study mind maps. The current build focuses on the Chainlit playground experience; a production HTTP/React surface is on the roadmap.
+# Lastminute.ai
+
+LangGraph supervisor orchestrating multiple specialist agents—quick search, deep MCP research, mind-map synthesis, and image generation—to answer revision-style prompts. Today it ships with a Chainlit playground; a FastAPI + React surface is on the roadmap.
+
+---
+
+## Tech Stack
+
+<div align="center">
+
+| Layer           | Tools |
+|-----------------|-------|
+| **Runtime**     | Python 3.11, uv, Docker |
+| **LLM & Agents**| LangChain Core, LangGraph, OpenAI, Tavily, MCP (multi-call), Nano Banana image providers |
+| **Interface**   | Chainlit (current), FastAPI + React (planned) |
+| **Data & Utils**| Pydantic, Requests |
+| **Testing**     | Pytest |
+
+</div>
+
+---
 
 ## Quick Start
 
 ```bash
 uv venv --python 3.11
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 uv sync
 
-# Provide your API keys (OpenAI, Tavily, optional Gemini) in .env
-cp .env.example .env && edit .env
+cp .env.example .env               # add OPENAI_API_KEY, TAVILY_API_KEY, optional GEMINI
 
-# Launch the Chainlit UI
 uv run chainlit run interface/chainlit_ui.py
 ```
 
-Sample interactions and agent traces are available under `examples/`:
+Example scripts (logging-heavy):
 
 ```bash
 uv run python examples/supervisor_service_demo.py
-uv run python examples/test.py          # mind map reference workflow
+uv run python examples/test.py         # reference-based mind map flow
 ```
 
-Run the test suite with:
+Run tests:
 
 ```bash
 uv run pytest -q
 ```
 
-## Minimal Layout
+---
+
+## Folder Layout
 
 ```
 agent-api/
 ├─ src/lastminute_api/
 │  ├─ application/agent_service/
-│  │  ├─ graph.py         # LangGraph wiring
-│  │  ├─ node.py          # Supervisor + worker nodes
-│  │  ├─ service.py       # run_revision_agent entry points
-│  │  └─ state.py         # Shared conversation state
-│  ├─ domain/tools/       # Tavily + mind map tooling
-│  └─ infrastructure/     # LLM providers, MCP client, nano banana
+│  │  ├─ graph.py      # Build the LangGraph state machine
+│  │  ├─ node.py       # Supervisor + worker nodes
+│  │  ├─ service.py    # run_revision_agent sync/async helpers
+│  │  └─ state.py      # Shared AgentState definition
+│  ├─ domain/tools/    # Tavily client, mind map registry
+│  └─ infrastructure/  # LLM providers (OpenAI/Groq), MCP client, nano banana
 ├─ interface/chainlit_ui.py
 ├─ examples/
 └─ tests/
 ```
 
-## Architecture
+---
+
+## Architecture Snapshot
 
 ### LangGraph Supervisor (`graph.py`)
 
-- Builds a `StateGraph` whose entry point is the supervisor node.
-- Edges return every worker back to the supervisor and end once a final response is emitted.
-- The state is backed by `AgentState`, keeping the chat transcript plus the latest outputs such as `mind_map_url`.
+- Entry node: `supervisor` decides the next action via a structured OpenAI router prompt (`SupervisorDecision`).
+- Worker nodes (`tavily_agent`, `mcp_agent`, `mind_map_agent`, `image_agent`) update shared state then hand control back to the supervisor.
+- Final answers are staged in `chat_response`; once present, the supervisor appends to messages and ends the graph.
 
-### Decision & Worker Nodes (`node.py`)
+### Worker Highlights (`node.py`)
 
-1. **Supervisor**
-   - Collects the last user query (`_extract_user_query`) and asks an OpenAI model for a structured `SupervisorDecision`.
-   - Handoff options: `simple_answer`, `quick_search`, `deep_research`, `image_generation`, `mind_map`.
-   - When a worker finishes and the response is staged in `chat_response`, the supervisor finalises and ends the graph.
+- **Quick Search**: Tavily API + snippet formatter → OpenAI summariser with inline citation markers.
+- **Deep Research**: Generates a brief using `deep_research_brief` prompt, invokes MCP agent, records the rich answer.
+- **Mind Map**: LLM creates a JSON outline; `create_mindmap` returns a short reference. We immediately resolve the PNG via `display_mindmap/get_mindmap`, summarise as bullet points, and expose both text + image to Chainlit.
+- **Image Generation**: Crafts a focused prompt and tries Gemini ⇒ OpenAI image APIs via nano banana helpers.
 
-2. **Quick Search**
-   - Calls Tavily (`_tavily_search`), formats numbered snippets, and prompts the LLM with the `quick_search_summary` template to produce a short citation-aware answer.
+### Chainlit Frontend (`interface/chainlit_ui.py`)
 
-3. **Deep Research (MCP)**
-   - Expands the handoff message into a brief using `deep_research_brief`.
-   - Invokes the MCP agent asynchronously and captures the rich answer or error text.
+- Retains message history, calls `run_revision_agent`, renders the assistant reply.
+- Displays the PNG from `image_url` (image agent) or `mind_map_url` (mind map worker) automatically.
+- Shows routing notes when the supervisor provides rationale.
 
-4. **Mind Map**
-   - Generates outline JSON (topic + subtopics) from the LLM to keep prompts compact.
-   - Calls `create_mindmap` (falls back to `simple_mindmap`) so only a short reference ID (e.g. `mm_132216_5634a1`) hits the model context.
-   - The reference is immediately resolved to a base64 PNG via `display_mindmap`/`get_mindmap`, stored in `mind_map_url`, and summarised as bullet points for the user. Chainlit renders the PNG automatically.
-
-5. **Image Generation**
-   - Uses another OpenAI call to craft a single-paragraph visual prompt before trying Gemini ⇒ OpenAI image providers via the nano-banana helpers.
-
-Shared helpers at the top of `node.py` cover user query extraction, Tavily formatters, and outline/subtopic derivation. This keeps each worker lean and focused on its external tool surface.
-
-## Chainlit UX
-
-The conversation UI in `interface/chainlit_ui.py`:
-
-- Calls `run_revision_agent` with the message history on every turn.
-- Displays the assistant answer, any routing notes, and renders a PNG for either `image_url` (image agent) or `mind_map_url` (mind map worker).
+---
 
 ## Configuration
 
-- `.env.example` lists the keys the agents expect: `OPENAI_API_KEY`, `TAVILY_API_KEY`, optional `GEMINI_API_KEY`, and MCP server settings.
-- `pyproject.toml` defines the Poetry/uv metadata; `uv.lock` pins dependencies for reproducible installs.
+- `.env` expects at least `OPENAI_API_KEY` and `TAVILY_API_KEY`. Optional: `GEMINI_API_KEY`, MCP server host & token.
+- `pyproject.toml` + `uv.lock` manage dependencies; `Makefile` contains common lint/format/test tasks.
 
-## Tests & Quality
-
-The suite under `tests/` exercises provider prompts, nano banana adapters, and MCP harnesses. Extend with scenario tests when you touch `node.py` or add new workers.
-
-```
-uv run pytest -q
-```
-
-Lint/format commands are available in the `Makefile`; run them before proposing changes.
+---
 
 ## Roadmap
 
-- Expose the LangGraph agent behind a stable FastAPI endpoint.
-- Add a React dashboard that reuses the Chainlit flow.
-- Expand automated coverage for the supervisor routing edges and the mind map summariser.
+- Wrap the LangGraph supervisor in a FastAPI HTTP endpoint with streaming responses.
+- Build a React dashboard reusing the Chainlit flow.
+- Add tests for supervisor routing edges and mind-map outline fallbacks.
+- Expand logging/metrics for production observability.
 
-Contributions that keep the state lean, prompts clear, and worker outputs reference-based are welcome. EOF
+---
+
+## Contributing
+
+1. Fork & clone the repo.
+2. Create a feature branch (`git checkout -b feat/my-change`).
+3. Run formatting (`make format`) and tests (`uv run pytest`).
+4. Open a PR describing the behaviour change and test coverage.
+
+---
+
+Made with ❤️ by the Lastminute.ai team.
+
+<div align="center">
+  <a href="#top">⬆️ Back to top</a>
+</div>
