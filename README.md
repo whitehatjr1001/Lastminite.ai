@@ -116,6 +116,12 @@ agent-api/
 
 ---
 
+## Credits
+
+Thanks to [MichaelisTrofficus](https://github.com/MichaelisTrofficus) for the excellent agent cookie-cutter that inspired this project’s structure.
+
+---
+
 Made with ❤️ by the Lastminute.ai team.
 
 <div align="center">
