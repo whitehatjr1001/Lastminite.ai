@@ -64,13 +64,13 @@ async def on_message(message: cl.Message) -> None:
     answer = summary.get("answer") or "I couldn’t produce an answer this time."
     await cl.Message(content=answer).send()
 
-    image_url = summary.get("image_url")
-    if image_url:
-        mime, blob = _decode_data_uri(image_url)
+    display_url = summary.get("image_url") or summary.get("mind_map_url")
+    if display_url:
+        mime, blob = _decode_data_uri(display_url)
         if blob:
             image_element = cl.Image(name="Generated image", content=blob, mime=mime or "image/png")
         else:
-            image_element = cl.Image(name="Generated image", url=image_url)
+            image_element = cl.Image(name="Generated image", url=display_url)
         await cl.Message(content="Here is the generated image:", elements=[image_element]).send()
 
     if state.get("routing_notes"):

@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from lastminute_api.application.agent_service.prompts import get_prompt
 from lastminute_api.application.agent_service.state import AgentState as State
-from lastminute_api.domain.tools.registry import MINDMAP_STORE, create_mindmap, simple_mindmap
+from lastminute_api.domain.tools.registry import create_mindmap, display_mindmap, get_mindmap, simple_mindmap
 from lastminute_api.infrastructure.llm_providers.base import get_llm_by_type
 from lastminute_api.infrastructure.mcp.mcp_agent import create_agent as create_mcp_agent
 from lastminute_api.infrastructure.nano_bannana.base import NanoBananaResult
@@ -55,12 +55,81 @@ def _preview(text: str, *, limit: int = 200) -> str:
 
 
 def _extract_reference_id(text: str) -> Optional[str]:
-    """Pull a stored mind map reference ID out of a response string."""
-
     if not text:
         return None
-    match = re.search(r"Reference:\s*([A-Za-z0-9_\-]+)", text)
+    match = re.search(r"Reference:\s*([A-Za-z0-9_]+)", text)
     return match.group(1) if match else None
+
+
+def _clean_text_block(text: str) -> str:
+    if not text:
+        return ""
+    lines = [line for line in text.splitlines() if "Invalid Format" not in line]
+    return "\n".join(lines).strip()
+
+
+def _parse_outline_json(text: str) -> tuple[Optional[str], List[str]]:
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        return None, []
+    candidate = match.group(0).strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?", "", candidate, count=1).strip()
+        if candidate.endswith("```"):
+            candidate = candidate[:-3].strip()
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        try:
+            payload = json.loads(candidate.replace("'", '"'))
+        except json.JSONDecodeError:
+            return None, []
+    topic = payload.get("topic") if isinstance(payload, dict) else None
+    subtopics = payload.get("subtopics") if isinstance(payload, dict) else []
+    if isinstance(subtopics, str):
+        subtopics = [chunk.strip() for chunk in re.split(r",|;", subtopics) if chunk.strip()]
+    elif not isinstance(subtopics, list):
+        subtopics = []
+    cleaned_subtopics = [str(item).strip() for item in subtopics if str(item).strip()]
+    return (str(topic).strip() if topic else None, cleaned_subtopics[:8])
+
+
+def _derive_subtopics(topic: str, *sources: str, limit: int = 8) -> List[str]:
+    candidates: List[str] = []
+    for source in sources:
+        if not source:
+            continue
+        for raw_line in source.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[\d\-•*.() ]+", "", line)
+            head = re.split(r"[:\-–]|\\u2013", line, maxsplit=1)[0].strip()
+            head = re.sub(r"[^A-Za-z0-9 /&()+]", "", head)
+            head = re.sub(r"\s+", " ", head).strip()
+            if 3 <= len(head) <= 40:
+                head = head.title()
+                candidates.append(head)
+    if not candidates:
+        base = topic.split("(")[0].strip() or "Study"
+        candidates = [
+            f"{base} Overview".strip(),
+            "Core Concepts",
+            "Key Techniques",
+            "Applications",
+            "Benefits",
+            "Challenges",
+            "Best Practices",
+            "Future Trends",
+        ]
+    unique: List[str] = []
+    for item in candidates:
+        short = item[:36].strip()
+        if short and short not in unique:
+            unique.append(short)
+        if len(unique) >= limit:
+            break
+    return unique
 
 
 def _tavily_search(query: str, *, max_results: int = 4) -> Dict[str, object]:
@@ -658,53 +727,82 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
     knowledge_block = search_notes or "No external snippets were available; rely on user context and prior turns."
 
     llm = get_llm_by_type("openai")
-    prompt = PromptTemplate.from_template(get_prompt("reference_mindmap_prompt"))
-    react_agent = create_react_agent(
-        llm=llm,
-        tools=[create_mindmap, simple_mindmap],
-        prompt=prompt,
+
+    outline_prompt = (
+        "Summarise the topic and notes into JSON with keys 'topic' and 'subtopics'. "
+        "Return only JSON. Limit subtopics to concise phrases (<=4 words)."
+    )
+    outline_messages = [
+        SystemMessage(content=outline_prompt),
+        HumanMessage(
+            content=(
+                f"Topic: {topic or 'Not provided'}\n"
+                f"Supervisor notes: {supervisor_notes or 'None'}\n"
+                "Supporting knowledge:\n"
+                f"{knowledge_block}"
+            )
+        ),
+    ]
+
+    outline_topic: Optional[str] = None
+    outline_subtopics: List[str] = []
+    try:
+        outline_response = llm.invoke(outline_messages)
+        outline_text = _clean_text_block(getattr(outline_response, "content", ""))
+        outline_topic, outline_subtopics = _parse_outline_json(outline_text)
+    except Exception:  # pragma: no cover - outline failure
+        logger.debug("Mind map outline generation failed", exc_info=True)
+
+    topic_name = outline_topic or topic or search_query or "Study Topic"
+    subtopics = outline_subtopics or _derive_subtopics(
+        topic_name,
+        supervisor_notes,
+        knowledge_block,
     )
 
-    executor = AgentExecutor(
-        agent=react_agent,
-        tools=[create_mindmap, simple_mindmap],
-        verbose=False,
-        handle_parsing_errors=True,
-        max_iterations=5,
-    )
-
-    agent_input = "\n".join(
-        [
-            f"Create a mind map for: {topic or 'general study topic'}",
-            f"Supervisor guidance: {supervisor_notes or 'N/A'}",
-            "Grounding notes:",
-            knowledge_block,
-        ]
-    )
-
-    mind_map_summary = ""
-    mind_map_reference = None
+    serialized = ", ".join(subtopics[:8]) or topic_name
 
     try:
-        result = executor.invoke({"input": agent_input})
-    except Exception as exc:  # pragma: no cover - agent execution failure
-        logger.exception("Mind map agent execution failed")
-        mind_map_summary = f"Mind map generation failed: {exc}"
-    else:
-        if isinstance(result, dict):
-            mind_map_summary = str(result.get("output", "")).strip()
-        else:
-            mind_map_summary = str(result).strip()
+        result_text = str(create_mindmap.invoke(f"{topic_name}: {serialized}")).strip()
+    except Exception as exc:  # pragma: no cover - fallback to simple mind map
+        logger.warning("create_mindmap failed, retrying with simple_mindmap", exc_info=True)
+        try:
+            result_text = str(
+                simple_mindmap.invoke(
+                    {
+                        "topic": topic_name,
+                        "subtopics": ",".join(subtopics[:6]),
+                    }
+                )
+            ).strip()
+        except Exception as final_exc:  # pragma: no cover - both tools failed
+            logger.exception("Mind map generation failed")
+            result_text = f"Mind map generation failed: {final_exc}"
 
-    mind_map_reference = _extract_reference_id(mind_map_summary)
+    result_text = _clean_text_block(result_text)
+    mind_map_reference = _extract_reference_id(result_text)
+    mind_map_summary = result_text
+    mind_map_url: Optional[str] = None
 
-    mind_map_image = None
     if mind_map_reference:
-        if mind_map_reference in MINDMAP_STORE:
-            mind_map_image = MINDMAP_STORE[mind_map_reference].get("base64")
-        mind_map_summary = (
-            f"{mind_map_summary}\n\nUse `display_mindmap('{mind_map_reference}')` to open the cached diagram."
-        ).strip()
+        try:
+            display_mindmap(mind_map_reference)
+        except Exception:  # pragma: no cover - filesystem guard
+            logger.debug("Mind map display helper failed for %s", mind_map_reference)
+        mind_map_url = get_mindmap(mind_map_reference)
+        if isinstance(mind_map_url, str) and mind_map_url.startswith("Reference not found"):
+            mind_map_url = None
+
+        overview_lines = [
+            f"Here's the study outline for {topic_name}:",
+            "",
+        ]
+        for item in subtopics[:8]:
+            overview_lines.append(f"- {item}")
+
+        overview_lines.append("")
+        overview_lines.append(f"Reference ID for later viewing: {mind_map_reference}")
+        mind_map_summary = "\n".join(overview_lines).strip()
 
     if not mind_map_summary:
         mind_map_summary = "Unable to generate a mind map summary at this time."
@@ -718,8 +816,8 @@ def mind_map_agent_node(state: State) -> Command[Literal["supervisor"]]:
         "mind_map_instruction": topic,
         "mind_map_summary": mind_map_summary,
         "mind_map_reference": mind_map_reference,
-        "mind_map_url": mind_map_image,
-        "image_url": mind_map_image,
+        "mind_map_url": mind_map_url,
+        "image_url": mind_map_url,
         "last_search_payload": search_payload,
         "routing_notes": supervisor_notes,
         "handoff_instructions": None,
