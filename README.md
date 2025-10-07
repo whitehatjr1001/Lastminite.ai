@@ -49,6 +49,10 @@ uv run chainlit run interface/chainlit_ui.py
 
 Prefer full resolution with audio? [Download the MP4](assets/lastminute-ai-demo.mp4).
 
+Supervisor routing overview:
+
+![LangGraph supervisor layout](graph.png)
+
 Example scripts (logging-heavy):
 
 ```bash
